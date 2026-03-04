@@ -146,18 +146,36 @@ export class WsAgentBridge {
       server,
       path: wsPath,
       verifyClient: (info, cb) => {
-        const token = this._extractToken(info.req as IncomingMessage);
-        const ok = !!this._findAgentByToken(token);
-        if (!ok) {
-          console.warn(`[${new Date().toISOString()}] WARN  [WsAgentBridge] verifyClient rejected — invalid token`);
+        const req   = info.req as IncomingMessage;
+        const token = this._extractToken(req);
+        const agent = this._findAgentByToken(token);
+        const ts    = new Date().toISOString();
+        if (!agent) {
+          // Log enough detail to diagnose Railway proxy stripping headers
+          const hasAuthHeader = !!req.headers["authorization"];
+          const hasTokenParam = (req.url ?? "").includes("token=");
+          console.warn(
+            `[${ts}] WARN  [WsAgentBridge] verifyClient REJECTED` +
+            ` — url="${req.url}" authHeader=${hasAuthHeader} tokenParam=${hasTokenParam}` +
+            ` registeredAgents=${this._agents.size}`,
+          );
+          cb(false, 401, "Unauthorized");
+        } else {
+          console.log(
+            `[${ts}] INFO  [WsAgentBridge] verifyClient ACCEPTED` +
+            ` — agentId="${agent.agentId}" name="${agent.name}" url="${req.url}"`,
+          );
+          cb(true);
         }
-        cb(ok, 401, "Unauthorized");
       },
     });
     this._wss.on("connection", (ws, req) => {
       this._handleWsConnection(ws, req as IncomingMessage);
     });
-    console.log(`[${new Date().toISOString()}] INFO  [WsAgentBridge] Agent WS attached at path ${wsPath}`);
+    this._wss.on("error", (err: Error) => {
+      console.error(`[${new Date().toISOString()}] ERROR [WsAgentBridge] WSS error: ${err.message}`);
+    });
+    console.log(`[${new Date().toISOString()}] INFO  [WsAgentBridge] Agent WS attached at path "${wsPath}"`);
   }
 
   /** List agents currently connected via WebSocket (tokens excluded). */
@@ -276,6 +294,9 @@ export class WsAgentBridge {
   }
 
   private _handleWsMessage(agent: WsAgentRecord, ws: WebSocket, raw: string): void {
+    const ts = new Date().toISOString();
+    console.log(`[${ts}] INFO  [WsAgentBridge] Message from ${agent.agentId}: ${raw.slice(0, 300)}`);
+
     let cmd: WsCommand;
     try {
       cmd = JSON.parse(raw) as WsCommand;
@@ -284,6 +305,7 @@ export class WsAgentBridge {
       return;
     }
 
+    try {
     switch (cmd.action) {
       // ── Discovery ──────────────────────────────────────────────────────
       case "list_tables": {
@@ -382,6 +404,14 @@ export class WsAgentBridge {
       default:
         this._send(ws, { event: "error", message: `Unknown action: ${cmd.action}` });
     }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[${new Date().toISOString()}] ERROR [WsAgentBridge] Unhandled error` +
+        ` processing action "${cmd.action}" for ${agent.agentId}: ${msg}`,
+      );
+      this._send(ws, { event: "error", message: `Internal server error: ${msg}` });
+    }
   }
 
   /** Returns an error ToolResult when tableId is missing, otherwise undefined. */
@@ -395,37 +425,44 @@ export class WsAgentBridge {
   // -------------------------------------------------------------------------
 
   private _onStoreUpdate(tableId: string, record: TableRecord): void {
-    const { state } = record;
+    try {
+      const { state } = record;
 
-    for (const [agentId, ws] of this._connections) {
-      if (!record.agents.has(agentId)) continue;
-      if (ws.readyState !== WebSocket.OPEN) continue;
+      for (const [agentId, ws] of this._connections) {
+        if (!record.agents.has(agentId)) continue;
+        if (ws.readyState !== WebSocket.OPEN) continue;
 
-      // Always send game_update
-      this._send(ws, this._buildGameUpdate(tableId, record));
+        // Always send game_update
+        this._send(ws, this._buildGameUpdate(tableId, record));
 
-      // hand_complete on settlement
-      if (state.phase === "settlement") {
-        this._send(ws, {
-          event:       "hand_complete",
-          tableId,
-          handNumber:  state.handNumber,
-          winners:     state.winners as unknown[],
-        });
-        continue;
-      }
+        // hand_complete on settlement
+        if (state.phase === "settlement") {
+          this._send(ws, {
+            event:       "hand_complete",
+            tableId,
+            handNumber:  state.handNumber,
+            winners:     state.winners as unknown[],
+          });
+          continue;
+        }
 
-      // your_turn for the acting agent
-      if (
-        state.phase !== "waiting"   &&
-        state.phase !== "showdown"  &&
-        state.phase !== "execution"
-      ) {
-        const actionSeat = state.seats[state.actionOnIndex];
-        if (actionSeat?.agentId === agentId && actionSeat.status === "active") {
-          this._send(ws, this._buildYourTurn(tableId, record, actionSeat));
+        // your_turn for the acting agent
+        if (
+          state.phase !== "waiting"   &&
+          state.phase !== "showdown"  &&
+          state.phase !== "execution"
+        ) {
+          const actionSeat = state.seats[state.actionOnIndex];
+          if (actionSeat?.agentId === agentId && actionSeat.status === "active") {
+            this._send(ws, this._buildYourTurn(tableId, record, actionSeat));
+          }
         }
       }
+    } catch (err) {
+      console.error(
+        `[${new Date().toISOString()}] ERROR [WsAgentBridge] Error in store update handler` +
+        ` for table "${tableId}": ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 

@@ -65,6 +65,20 @@ function log(level: LogLevel, msg: string, meta?: Record<string, unknown>): void
 }
 
 // ---------------------------------------------------------------------------
+// Global error handlers — prevent silent crashes from killing WS connections
+// ---------------------------------------------------------------------------
+
+process.on("uncaughtException", (err: Error) => {
+  log("ERROR", `Uncaught exception: ${err.message}`, { stack: err.stack });
+  // Do NOT exit — keep the server running for active connections
+});
+
+process.on("unhandledRejection", (reason: unknown) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  log("ERROR", `Unhandled promise rejection: ${msg}`);
+});
+
+// ---------------------------------------------------------------------------
 // CORS middleware
 // ---------------------------------------------------------------------------
 
@@ -135,6 +149,27 @@ httpApp.use((req: Request, _res: Response, next: NextFunction): void => {
 // ---------------------------------------------------------------------------
 
 const httpServer = createServer(httpApp);
+
+// Disable HTTP socket timeout so Railway's proxy doesn't kill idle WebSocket connections.
+// Node.js default is already 0, but setting explicitly prevents any middleware from changing it.
+httpServer.setTimeout(0);
+
+// ---------------------------------------------------------------------------
+// Diagnostic: log every WebSocket upgrade request BEFORE the WSS handles it.
+// This reveals if Railway is modifying the upgrade path or stripping headers.
+// ---------------------------------------------------------------------------
+
+httpServer.on("upgrade", (req) => {
+  const hasAuth  = !!req.headers["authorization"];
+  const hasToken = (req.url ?? "").includes("token=");
+  log("INFO", `WS upgrade request`, {
+    url:       req.url,
+    authHeader: hasAuth  ? "Bearer ***" : "MISSING",
+    tokenParam: hasToken ? "present"    : "absent",
+    origin:    req.headers["origin"] ?? "none",
+    userAgent: (req.headers["user-agent"] ?? "none").slice(0, 60),
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Agent WebSocket  —  /ws  (external AI agents, token-authenticated)
