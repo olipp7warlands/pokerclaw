@@ -170,7 +170,16 @@ export class WsAgentBridge {
       },
     });
     this._wss.on("connection", (ws, req) => {
-      this._handleWsConnection(ws, req as IncomingMessage);
+      // Outer try-catch: if _handleWsConnection throws, log and close cleanly
+      // instead of letting the exception propagate to ws internals (which would
+      // destroy the socket with no close frame → code 1006 on the client).
+      try {
+        this._handleWsConnection(ws, req as IncomingMessage);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[${new Date().toISOString()}] ERROR [WsAgentBridge] CRASH in connection handler: ${msg}`, err);
+        try { ws.close(1011, "Internal server error"); } catch { /* ignore */ }
+      }
     });
     this._wss.on("error", (err: Error) => {
       console.error(`[${new Date().toISOString()}] ERROR [WsAgentBridge] WSS error: ${err.message}`);
@@ -238,28 +247,46 @@ export class WsAgentBridge {
   // -------------------------------------------------------------------------
 
   private _handleWsConnection(ws: WebSocket, req: IncomingMessage): void {
-    const token = this._extractToken(req);
-    const agent = this._findAgentByToken(token);
+    const ts0 = new Date().toISOString();
+    console.log(`[${ts0}] INFO  [WsAgentBridge] connection handler START — readyState=${ws.readyState}`);
 
+    // ── Token extraction (defensive — URL constructor can throw on bad URLs) ──
+    let token: string;
+    try {
+      token = this._extractToken(req);
+    } catch (e) {
+      console.error(`[${new Date().toISOString()}] ERROR [WsAgentBridge] _extractToken threw: ${e}`);
+      ws.close(1011, "Token extraction error");
+      return;
+    }
+
+    const agent = this._findAgentByToken(token);
     if (!agent) {
-      console.warn(`[${new Date().toISOString()}] WARN  [WsAgentBridge] Unauthorized connection attempt — closing`);
+      // verifyClient already checked this; only hits here if token was revoked
+      // between verifyClient and connection — rare but possible.
+      console.warn(`[${new Date().toISOString()}] WARN  [WsAgentBridge] Token not found in connection handler (was valid in verifyClient). Token prefix: "${token.slice(0, 8)}..."`);
       ws.close(4001, "Unauthorized");
       return;
     }
 
-    // One connection per agent — close any previous one
+    console.log(`[${new Date().toISOString()}] INFO  [WsAgentBridge] Agent identified: ${agent.agentId} (${agent.name})`);
+
+    // ── Replace previous connection if any ──
     const existing = this._connections.get(agent.agentId);
-    if (existing) {
+    if (existing && existing !== ws) {
       console.log(`[${new Date().toISOString()}] INFO  [WsAgentBridge] Replacing existing connection for ${agent.agentId}`);
-      existing.close(4002, "Replaced by new connection");
+      try { existing.close(4002, "Replaced by new connection"); } catch { /* already closed */ }
     }
     this._connections.set(agent.agentId, ws);
     console.log(`[${new Date().toISOString()}] INFO  [WsAgentBridge] Agent connected: ${agent.agentId} (${agent.name}) total=${this._connections.size}`);
 
-    // ── Ping/pong heartbeat — keeps connection alive through Railway proxy ───
-    // Without this, idle connections are dropped with code 1006 after ~30s.
+    // ── Ping/pong heartbeat — keeps connection alive through Railway proxy ──
     let isAlive = true;
     const heartbeat = setInterval(() => {
+      if (ws.readyState !== WebSocket.OPEN) {
+        clearInterval(heartbeat);
+        return;
+      }
       if (!isAlive) {
         console.warn(`[${new Date().toISOString()}] WARN  [WsAgentBridge] Agent ${agent.agentId} missed pong — terminating`);
         clearInterval(heartbeat);
@@ -270,6 +297,7 @@ export class WsAgentBridge {
       ws.ping();
     }, 30_000);
 
+    // ── Event handlers — registered BEFORE welcome so no message is missed ──
     ws.on("pong", () => { isAlive = true; });
 
     ws.on("message", (data) => {
@@ -277,20 +305,28 @@ export class WsAgentBridge {
     });
 
     ws.on("error", (err: Error) => {
-      console.error(`[${new Date().toISOString()}] ERROR [WsAgentBridge] Agent ${agent.agentId} error: ${err.message}`);
+      console.error(`[${new Date().toISOString()}] ERROR [WsAgentBridge] Agent ${agent.agentId} socket error: ${err.message}`);
     });
 
-    ws.on("close", (code: number, reason: Buffer) => {
+    ws.on("close", (code: number, reason: unknown) => {
       clearInterval(heartbeat);
-      const reasonStr = reason.length > 0 ? reason.toString() : "(no reason)";
+      // reason is a Buffer in ws v8, but guard defensively for any runtime
+      let reasonStr = "(no reason)";
+      try {
+        if (reason instanceof Buffer && reason.length > 0) reasonStr = reason.toString();
+        else if (typeof reason === "string" && reason.length > 0) reasonStr = reason;
+      } catch { /* ignore */ }
       console.log(`[${new Date().toISOString()}] INFO  [WsAgentBridge] Agent disconnected: ${agent.agentId} code=${code} reason=${reasonStr} total=${this._connections.size - 1}`);
       if (this._connections.get(agent.agentId) === ws) {
         this._connections.delete(agent.agentId);
       }
     });
 
-    // Welcome message — confirms successful connection to the agent
-    this._send(ws, { event: "connected", agentId: agent.agentId });
+    // ── Welcome message ──
+    this._send(ws, { event: "connected", agentId: agent.agentId, message: "Welcome to PokerCrawl" });
+    console.log(`[${new Date().toISOString()}] INFO  [WsAgentBridge] Welcome sent to ${agent.agentId} — readyState=${ws.readyState}`);
+
+    console.log(`[${new Date().toISOString()}] INFO  [WsAgentBridge] connection handler END — readyState=${ws.readyState}`);
   }
 
   private _handleWsMessage(agent: WsAgentRecord, ws: WebSocket, raw: string): void {
