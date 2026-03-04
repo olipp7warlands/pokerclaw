@@ -145,6 +145,10 @@ export class WsAgentBridge {
     this._wss = new WebSocketServer({
       server,
       path: wsPath,
+      // Disable per-message compression — Railway's reverse proxy sometimes
+      // mishandles the permessage-deflate extension negotiation and drops the
+      // connection immediately after the upgrade handshake.
+      perMessageDeflate: false,
       verifyClient: (info, cb) => {
         const req   = info.req as IncomingMessage;
         const token = this._extractToken(req);
@@ -280,7 +284,10 @@ export class WsAgentBridge {
     this._connections.set(agent.agentId, ws);
     console.log(`[${new Date().toISOString()}] INFO  [WsAgentBridge] Agent connected: ${agent.agentId} (${agent.name}) total=${this._connections.size}`);
 
-    // ── Ping/pong heartbeat — keeps connection alive through Railway proxy ──
+    // ── Ping/pong heartbeat ─────────────────────────────────────────────────
+    // Railway's reverse proxy drops idle WebSocket connections in ~30s.
+    // Ping every 10s (well under the threshold) and immediately on connect
+    // to signal activity before the proxy has a chance to consider it idle.
     let isAlive = true;
     const heartbeat = setInterval(() => {
       if (ws.readyState !== WebSocket.OPEN) {
@@ -295,7 +302,7 @@ export class WsAgentBridge {
       }
       isAlive = false;
       ws.ping();
-    }, 30_000);
+    }, 10_000); // 10s — well below Railway's idle-close threshold
 
     // ── Event handlers — registered BEFORE welcome so no message is missed ──
     ws.on("pong", () => { isAlive = true; });
@@ -325,6 +332,13 @@ export class WsAgentBridge {
     // ── Welcome message ──
     this._send(ws, { event: "connected", agentId: agent.agentId, message: "Welcome to PokerCrawl" });
     console.log(`[${new Date().toISOString()}] INFO  [WsAgentBridge] Welcome sent to ${agent.agentId} — readyState=${ws.readyState}`);
+
+    // Immediate ping right after welcome: signals activity to Railway's proxy
+    // before it can classify the connection as idle and close it.
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.ping();
+      console.log(`[${new Date().toISOString()}] INFO  [WsAgentBridge] Initial ping sent to ${agent.agentId}`);
+    }
 
     console.log(`[${new Date().toISOString()}] INFO  [WsAgentBridge] connection handler END — readyState=${ws.readyState}`);
   }
