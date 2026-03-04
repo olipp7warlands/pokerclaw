@@ -147,12 +147,17 @@ export class WsAgentBridge {
       path: wsPath,
       verifyClient: (info, cb) => {
         const token = this._extractToken(info.req as IncomingMessage);
-        cb(!!this._findAgentByToken(token), 401, "Unauthorized");
+        const ok = !!this._findAgentByToken(token);
+        if (!ok) {
+          console.warn(`[${new Date().toISOString()}] WARN  [WsAgentBridge] verifyClient rejected — invalid token`);
+        }
+        cb(ok, 401, "Unauthorized");
       },
     });
     this._wss.on("connection", (ws, req) => {
       this._handleWsConnection(ws, req as IncomingMessage);
     });
+    console.log(`[${new Date().toISOString()}] INFO  [WsAgentBridge] Agent WS attached at path ${wsPath}`);
   }
 
   /** List agents currently connected via WebSocket (tokens excluded). */
@@ -219,26 +224,54 @@ export class WsAgentBridge {
     const agent = this._findAgentByToken(token);
 
     if (!agent) {
+      console.warn(`[${new Date().toISOString()}] WARN  [WsAgentBridge] Unauthorized connection attempt — closing`);
       ws.close(4001, "Unauthorized");
       return;
     }
 
     // One connection per agent — close any previous one
     const existing = this._connections.get(agent.agentId);
-    if (existing) existing.close(4002, "Replaced by new connection");
+    if (existing) {
+      console.log(`[${new Date().toISOString()}] INFO  [WsAgentBridge] Replacing existing connection for ${agent.agentId}`);
+      existing.close(4002, "Replaced by new connection");
+    }
     this._connections.set(agent.agentId, ws);
+    console.log(`[${new Date().toISOString()}] INFO  [WsAgentBridge] Agent connected: ${agent.agentId} (${agent.name}) total=${this._connections.size}`);
+
+    // ── Ping/pong heartbeat — keeps connection alive through Railway proxy ───
+    // Without this, idle connections are dropped with code 1006 after ~30s.
+    let isAlive = true;
+    const heartbeat = setInterval(() => {
+      if (!isAlive) {
+        console.warn(`[${new Date().toISOString()}] WARN  [WsAgentBridge] Agent ${agent.agentId} missed pong — terminating`);
+        clearInterval(heartbeat);
+        ws.terminate();
+        return;
+      }
+      isAlive = false;
+      ws.ping();
+    }, 30_000);
+
+    ws.on("pong", () => { isAlive = true; });
 
     ws.on("message", (data) => {
       this._handleWsMessage(agent, ws, data.toString());
     });
 
-    ws.on("close", () => {
-      // Only clear if it's still our connection (not a replacement)
+    ws.on("error", (err: Error) => {
+      console.error(`[${new Date().toISOString()}] ERROR [WsAgentBridge] Agent ${agent.agentId} error: ${err.message}`);
+    });
+
+    ws.on("close", (code: number, reason: Buffer) => {
+      clearInterval(heartbeat);
+      const reasonStr = reason.length > 0 ? reason.toString() : "(no reason)";
+      console.log(`[${new Date().toISOString()}] INFO  [WsAgentBridge] Agent disconnected: ${agent.agentId} code=${code} reason=${reasonStr} total=${this._connections.size - 1}`);
       if (this._connections.get(agent.agentId) === ws) {
         this._connections.delete(agent.agentId);
       }
     });
 
+    // Welcome message — confirms successful connection to the agent
     this._send(ws, { event: "connected", agentId: agent.agentId });
   }
 
