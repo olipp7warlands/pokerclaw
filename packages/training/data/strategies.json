@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "updatedAt": "2026-02-23T21:46:36.777Z",
+  "handsAnalyzed": 5000,
+  "agents": {
+    "shark": {
+      "personality": {
+        "aggression": 1,
+        "bluffFrequency": 1,
+        "tiltResistance": 0.7,
+        "trashTalkLevel": 0.3,
+        "riskTolerance": 0.5
+      },
+      "lastStats": {
+        "handsPlayed": 5000,
+        "handsWon": 3900,
+        "vpip": 0.547,
+        "pfr": 0.346,
+        "af": 2.4607483492296405,
+        "showdownWR": 0.8023040526640609,
+        "wtsd": 0.9722,
+        "totalProfit": 365638
+      },
+      "eloRating": 1581
+    },
+    "rock": {
+      "personality": {
+        "aggression": 0.09000000000000001,
+        "bluffFrequency": 0,
+        "tiltResistance": 1,
+        "trashTalkLevel": 0.3,
+        "riskTolerance": 0.5
+      },
+      "lastStats": {
+        "handsPlayed": 5000,
+        "handsWon": 393,
+        "vpip": 0.1774,
+        "pfr": 0.1038,
+        "af": 1.4103942652329748,
+        "showdownWR": 0.5317997293640054,
+        "wtsd": 0.1478,
+        "totalProfit": -61844
+      },
+      "eloRating": 1488
+    },
+    "mago": {
+      "personality": {
+        "aggression": 0.8100000000000003,
+        "bluffFrequency": 0.13999999999999999,
+        "tiltResistance": 1,
+        "trashTalkLevel": 0.3,
+        "riskTolerance": 0.5
+      },
+      "lastStats": {
+        "handsPlayed": 5000,
+        "handsWon": 75,
+        "vpip": 0.0594,
+        "pfr": 0.006,
+        "af": 0.08968609865470852,
+        "showdownWR": 0.015441630636195183,
+        "wtsd": 0.9714,
+        "totalProfit": -84503
+      },
+      "eloRating": 603
+    },
+    "caos": {
+      "personality": {
+        "aggression": 0.6300000000000001,
+        "bluffFrequency": 0.20000000000000004,
+        "tiltResistance": 1,
+        "trashTalkLevel": 0.3,
+        "riskTolerance": 0.8900000000000003
+      },
+      "lastStats": {
+        "handsPlayed": 5000,
+        "handsWon": 497,
+        "vpip": 0.1236,
+        "pfr": 0.045,
+        "af": 2.574803149606299,
+        "showdownWR": 0.10868139077192215,
+        "wtsd": 0.9146,
+        "totalProfit": -57250
+      },
+      "eloRating": 1908
+    },
+    "reloj": {
+      "personality": {
+        "aggression": 0,
+        "bluffFrequency": 0,
+        "tiltResistance": 1,
+        "trashTalkLevel": 0.3,
+        "riskTolerance": 0.5
+      },
+      "lastStats": {
+        "handsPlayed": 5000,
+        "handsWon": 285,
+        "vpip": 0.147,
+        "pfr": 0.1066,
+        "af": 1.6986301369863013,
+        "showdownWR": 0.06553230627730512,
+        "wtsd": 0.8698,
+        "totalProfit": -72540
+      },
+      "eloRating": 1046
+    },
+    "wolf": {
+      "personality": {
+        "aggression": 0.24000000000000007,
+        "bluffFrequency": 0,
+        "tiltResistance": 1,
+        "trashTalkLevel": 0.3,
+        "riskTolerance": 0.5
+      },
+      "lastStats": {
+        "handsPlayed": 5000,
+        "handsWon": 70,
+        "vpip": 0.0572,
+        "pfr": 0.0168,
+        "af": 0.35218508997429304,
+        "showdownWR": 0.01440329218106996,
+        "wtsd": 0.972,
+        "totalProfit": -87515
+      },
+      "eloRating": 575
+    }
+  }
+}

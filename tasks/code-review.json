@@ -1,0 +1,14 @@
+{
+  "id": "code-review-001",
+  "name": "Code Review",
+  "description": "Review a pull request for correctness, performance, and style. Provide inline comments and a summary with a go/no-go recommendation.",
+  "effort": 6,
+  "suit": "spades",
+  "rank": "K",
+  "tags": ["engineering", "quality", "analysis"],
+  "metadata": {
+    "estimatedMinutes": 30,
+    "requiredCapabilities": ["code-analysis", "language-expertise", "documentation"],
+    "outputFormat": "GitHub PR review with inline comments"
+  }
+}

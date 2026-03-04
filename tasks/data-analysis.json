@@ -1,0 +1,14 @@
+{
+  "id": "data-analysis-001",
+  "name": "Data Analysis",
+  "description": "Analyse a dataset to identify trends, anomalies, and actionable insights. Produce a written report with supporting visualisations and statistical summaries.",
+  "effort": 8,
+  "suit": "diamonds",
+  "rank": "A",
+  "tags": ["data-science", "statistics", "reporting"],
+  "metadata": {
+    "estimatedMinutes": 90,
+    "requiredCapabilities": ["statistics", "python", "data-visualisation", "report-writing"],
+    "outputFormat": "PDF report + Jupyter notebook"
+  }
+}

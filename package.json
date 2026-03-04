@@ -1,0 +1,36 @@
+{
+  "name": "pokercrawl",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI Agent Poker Protocol — Texas Hold'em for task negotiation",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev":              "tsx scripts/start.ts",
+    "play":             "tsx scripts/start.ts --agents=4 --hands=10",
+    "play:fast":        "tsx scripts/start.ts --agents=4 --hands=20 --speed=5",
+    "play:ai":          "tsx scripts/start.ts --claude --openai --hands=5",
+    "train":            "tsx scripts/train.ts --bots=6 --hands=5000",
+    "train:fast":       "tsx scripts/train.ts --bots=6 --hands=50000 --silent",
+    "train:tournament": "tsx scripts/train.ts --bots=8 --hands=20000 --tournament",
+    "tournament":       "tsx scripts/start.ts --tournament --bots=8",
+    "lobby":            "tsx scripts/start.ts --lobby",
+    "gateway":          "tsx packages/gateway/src/server.ts",
+    "elo":              "tsx scripts/elo.ts",
+    "build":            "npm run build --workspaces",
+    "test":             "npm run test --workspaces",
+    "start":            "node --import tsx/esm scripts/production.ts",
+    "start:dev":        "tsx scripts/production.ts",
+    "docker:build":     "docker build -t pokercrawl .",
+    "docker:run":       "docker-compose up"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "tsx": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

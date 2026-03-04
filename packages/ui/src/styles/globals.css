@@ -1,0 +1,190 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    background-color: #0a0a0f;
+    color: #e5e7eb;
+    font-family: "JetBrains Mono", monospace;
+    overflow-x: hidden;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #12121a;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #2a2a3a;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #d4af37;
+  }
+}
+
+@layer components {
+  /* ── Felt table ─────────────────────────────────────────────────────── */
+  .felt-table {
+    background:
+      /* Woven fabric texture */
+      repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0, 0, 0, 0.045) 2px,
+        rgba(0, 0, 0, 0.045) 4px
+      ),
+      repeating-linear-gradient(
+        90deg,
+        transparent,
+        transparent 2px,
+        rgba(255, 255, 255, 0.012) 2px,
+        rgba(255, 255, 255, 0.012) 4px
+      ),
+      /* Main felt gradient */
+      radial-gradient(ellipse at 50% 45%, #1e7a4a 0%, #0d4a2e 55%, #072a19 100%);
+    box-shadow:
+      inset 0 0 120px rgba(0, 0, 0, 0.55),
+      inset 0 0 40px rgba(0, 0, 0, 0.3),
+      0 0 0 4px rgba(212, 175, 55, 0.22),
+      0 0 0 5px rgba(0, 0, 0, 0.6),
+      0 8px 80px rgba(0, 0, 0, 0.9);
+  }
+
+  /* ── Cards ───────────────────────────────────────────────────────────── */
+  .card-face {
+    background: linear-gradient(155deg, #1c1e2e 0%, #22243a 60%, #1a1c2c 100%);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow:
+      0 2px 8px rgba(0, 0, 0, 0.6),
+      0 0 0 0.5px rgba(255, 255, 255, 0.04) inset;
+  }
+
+  .card-back {
+    background:
+      repeating-linear-gradient(
+        45deg,
+        #0d4a2e,
+        #0d4a2e 5px,
+        #082d1b 5px,
+        #082d1b 10px
+      );
+    border: 2px solid rgba(212, 175, 55, 0.35);
+    box-shadow:
+      0 3px 10px rgba(0, 0, 0, 0.55),
+      inset 0 0 6px rgba(0, 0, 0, 0.3);
+  }
+
+  /* ── Agent seat states ───────────────────────────────────────────────── */
+  .agent-active {
+    animation: pulse-active 1.4s ease-in-out infinite;
+  }
+
+  .agent-allin {
+    animation: pulse-allin 1.8s ease-in-out infinite;
+  }
+
+  .out-badge {
+    animation: out-pulse 2.5s ease-in-out infinite;
+  }
+
+  /* ── Pot display ─────────────────────────────────────────────────────── */
+  .pot-glow {
+    animation: pot-shimmer 3s ease-in-out infinite;
+  }
+
+  /* ── Chip stack ──────────────────────────────────────────────────────── */
+  .chip-stack {
+    filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.5));
+  }
+}
+
+@layer utilities {
+  .text-shadow-gold {
+    text-shadow: 0 0 12px rgba(212, 175, 55, 0.7), 0 0 24px rgba(212, 175, 55, 0.3);
+  }
+
+  .perspective-card {
+    perspective: 800px;
+  }
+
+  .grid-circuit {
+    background-image:
+      linear-gradient(rgba(212, 175, 55, 0.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(212, 175, 55, 0.025) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+}
+
+/* ── Keyframes ─────────────────────────────────────────────────────────────── */
+
+@keyframes pulse-active {
+  0%, 100% {
+    box-shadow:
+      0 0 0 3px #d4af37,
+      0 0 14px rgba(212, 175, 55, 0.45),
+      0 0 28px rgba(212, 175, 55, 0.2);
+  }
+  50% {
+    box-shadow:
+      0 0 0 4px #f0d060,
+      0 0 28px rgba(240, 208, 96, 0.9),
+      0 0 56px rgba(212, 175, 55, 0.45);
+  }
+}
+
+@keyframes pulse-allin {
+  0%, 100% {
+    box-shadow:
+      0 0 0 2px #d4af37,
+      0 0 10px rgba(212, 175, 55, 0.5);
+  }
+  50% {
+    box-shadow:
+      0 0 0 3px #f0d060,
+      0 0 22px rgba(240, 208, 96, 0.85),
+      0 0 40px rgba(212, 175, 55, 0.35);
+  }
+}
+
+@keyframes out-pulse {
+  0%, 100% { opacity: 0.65; }
+  50%       { opacity: 1;    }
+}
+
+@keyframes pot-shimmer {
+  0%, 100% {
+    box-shadow:
+      0 0 14px rgba(212, 175, 55, 0.22),
+      inset 0 0 8px rgba(212, 175, 55, 0.06);
+  }
+  50% {
+    box-shadow:
+      0 0 28px rgba(212, 175, 55, 0.45),
+      inset 0 0 16px rgba(212, 175, 55, 0.12);
+  }
+}
+
+/* Mobile responsive helpers */
+@media (max-width: 767px) {
+  .table-scroll-area {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}

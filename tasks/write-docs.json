@@ -1,0 +1,14 @@
+{
+  "id": "write-docs-001",
+  "name": "Write Documentation",
+  "description": "Produce comprehensive API documentation and usage guides from source code and existing comments. Include examples for all public endpoints.",
+  "effort": 4,
+  "suit": "hearts",
+  "rank": "Q",
+  "tags": ["writing", "documentation", "developer-experience"],
+  "metadata": {
+    "estimatedMinutes": 45,
+    "requiredCapabilities": ["technical-writing", "code-reading", "markdown"],
+    "outputFormat": "Markdown files in /docs directory"
+  }
+}
