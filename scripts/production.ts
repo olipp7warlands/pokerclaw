@@ -24,7 +24,7 @@ import { createServer } from "node:http";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-import { GameStore, WsBridge, WsAgentBridge } from "@pokercrawl/mcp-server";
+import { GameStore, WsBridge, WsAgentBridge, HttpAgentBridge } from "@pokercrawl/mcp-server";
 import {
   type BaseAgent,
   type HandResult,
@@ -197,6 +197,15 @@ const agentBridge = new WsAgentBridge(agentStore);
 agentBridge.attachWs(httpServer, "/ws");
 
 // ---------------------------------------------------------------------------
+// HTTP Agent Bridge — long-polling fallback for cloud proxies that drop WS
+// ---------------------------------------------------------------------------
+
+const httpAgentBridge = new HttpAgentBridge(
+  agentStore,
+  (token) => agentBridge.findAgentByToken(token),
+);
+
+// ---------------------------------------------------------------------------
 // UI WebSocket  —  /ws-ui  (React frontend, no auth)
 // ---------------------------------------------------------------------------
 
@@ -291,6 +300,24 @@ httpApp.get("/api/agents", (_req: Request, res: Response): void => {
 
 httpApp.get("/api/agents/online", (_req: Request, res: Response): void => {
   res.json(agentBridge.listOnlineAgents());
+});
+
+// ---------------------------------------------------------------------------
+// HTTP long-poll transport  (fallback when Railway drops WebSocket)
+// ---------------------------------------------------------------------------
+
+httpApp.post("/api/agents/connect", (req: Request, res: Response): void => {
+  httpAgentBridge.handleConnect(req, res);
+});
+
+httpApp.get("/api/agents/poll/:sessionId", (req: Request, res: Response): void => {
+  // Keep the connection open — Express must NOT call res.end() via framework
+  res.setHeader("X-Accel-Buffering", "no"); // disable nginx buffering on Railway
+  httpAgentBridge.handlePoll(req.params["sessionId"]!, req, res);
+});
+
+httpApp.post("/api/agents/action/:sessionId", (req: Request, res: Response): void => {
+  httpAgentBridge.handleAction(req.params["sessionId"]!, req, res);
 });
 
 // ---------------------------------------------------------------------------

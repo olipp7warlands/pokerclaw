@@ -40,6 +40,8 @@ export type { ExternalAgentConfig, ExternalAgentRecord, ActionDecision } from ".
 export { WsAgentBridge } from "./ws-agent-bridge.js";
 export type { WsAgentConfig, WsAgentRecord, WsCommand, WsEvent } from "./ws-agent-bridge.js";
 
+export { HttpAgentBridge } from "./http-agent-bridge.js";
+
 export { createMcpServer, runStdioServer } from "./server.js";
 
 // Tools

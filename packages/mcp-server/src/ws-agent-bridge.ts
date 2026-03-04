@@ -246,6 +246,11 @@ export class WsAgentBridge {
     return [...this._agents.values()];
   }
 
+  /** Public token lookup — used by HttpAgentBridge to share agent registry. */
+  findAgentByToken(token: string): WsAgentRecord | undefined {
+    return this._findAgentByToken(token);
+  }
+
   // -------------------------------------------------------------------------
   // WebSocket connection handling
   // -------------------------------------------------------------------------
