@@ -19,7 +19,7 @@
     "lobby":            "tsx scripts/start.ts --lobby",
     "gateway":          "tsx packages/gateway/src/server.ts",
     "elo":              "tsx scripts/elo.ts",
-    "build":            "npm run build --workspaces",
+    "build":            "npm run build -w packages/engine && npm run build -w packages/mcp-server && npm run build -w packages/gateway && npm run build -w packages/agents && npm run build -w packages/training && npm run build -w packages/ui",
     "test":             "npm run test --workspaces",
     "start":            "node --import tsx/esm scripts/production.ts",
     "start:dev":        "tsx scripts/production.ts",
