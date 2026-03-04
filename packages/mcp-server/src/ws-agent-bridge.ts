@@ -295,7 +295,9 @@ export class WsAgentBridge {
 
   private _handleWsMessage(agent: WsAgentRecord, ws: WebSocket, raw: string): void {
     const ts = new Date().toISOString();
-    console.log(`[${ts}] INFO  [WsAgentBridge] Message from ${agent.agentId}: ${raw.slice(0, 300)}`);
+    if (process.env["NODE_ENV"] !== "production") {
+      console.log(`[${ts}] DEBUG [WsAgentBridge] Message from ${agent.agentId}: ${raw.slice(0, 300)}`);
+    }
 
     let cmd: WsCommand;
     try {

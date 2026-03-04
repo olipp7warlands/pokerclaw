@@ -49,19 +49,35 @@ const PORT         = Number(process.env["PORT"]      ?? 3000);
 const BOT_COUNT    = Number(process.env["BOT_COUNT"] ?? 4);
 const CORS_ORIGINS = (process.env["CORS_ORIGINS"] ?? "*").split(",").map((s) => s.trim());
 const VERSION      = "0.1.0";
+const IS_PROD      = process.env["NODE_ENV"] === "production";
 
 // ---------------------------------------------------------------------------
-// Logging
+// Logging — in production only INFO/WARN/ERROR reach the console.
+// DEBUG is silenced to avoid Railway log rate-limits killing WS connections.
 // ---------------------------------------------------------------------------
 
-type LogLevel = "INFO" | "WARN" | "ERROR";
-
-function log(level: LogLevel, msg: string, meta?: Record<string, unknown>): void {
+function _fmt(level: string, msg: string, meta?: Record<string, unknown>): string {
   const ts      = new Date().toISOString();
   const metaStr = meta ? " " + JSON.stringify(meta) : "";
-  const line    = `[${ts}] ${level.padEnd(5)} ${msg}${metaStr}`;
-  if (level === "ERROR") console.error(line);
-  else                   console.log(line);
+  return `[${ts}] ${level.padEnd(5)} ${msg}${metaStr}`;
+}
+
+/** High-volume debug logs — suppressed in production. */
+function logDebug(msg: string, meta?: Record<string, unknown>): void {
+  if (!IS_PROD) console.log(_fmt("DEBUG", msg, meta));
+}
+
+/** Important operational events — always logged. */
+function logInfo(msg: string, meta?: Record<string, unknown>): void {
+  console.log(_fmt("INFO", msg, meta));
+}
+
+function logWarn(msg: string, meta?: Record<string, unknown>): void {
+  console.warn(_fmt("WARN", msg, meta));
+}
+
+function logError(msg: string, meta?: Record<string, unknown>): void {
+  console.error(_fmt("ERROR", msg, meta));
 }
 
 // ---------------------------------------------------------------------------
@@ -69,13 +85,13 @@ function log(level: LogLevel, msg: string, meta?: Record<string, unknown>): void
 // ---------------------------------------------------------------------------
 
 process.on("uncaughtException", (err: Error) => {
-  log("ERROR", `Uncaught exception: ${err.message}`, { stack: err.stack });
+  logError(`Uncaught exception: ${err.message}`, { stack: err.stack });
   // Do NOT exit — keep the server running for active connections
 });
 
 process.on("unhandledRejection", (reason: unknown) => {
   const msg = reason instanceof Error ? reason.message : String(reason);
-  log("ERROR", `Unhandled promise rejection: ${msg}`);
+  logError(`Unhandled promise rejection: ${msg}`);
 });
 
 // ---------------------------------------------------------------------------
@@ -139,8 +155,9 @@ const httpApp = express();
 httpApp.use(corsMiddleware);
 httpApp.use(express.json());
 
+// HTTP request logging — debug only (each health-check would be a Railway log line)
 httpApp.use((req: Request, _res: Response, next: NextFunction): void => {
-  log("INFO", `${req.method} ${req.path}`, { ip: req.ip ?? "?" });
+  logDebug(`${req.method} ${req.path}`, { ip: req.ip ?? "?" });
   next();
 });
 
@@ -159,15 +176,15 @@ httpServer.setTimeout(0);
 // This reveals if Railway is modifying the upgrade path or stripping headers.
 // ---------------------------------------------------------------------------
 
+// WS upgrade diagnostics — always log in dev, always log in prod too so we can see
+// Railway proxy behavior without needing a redeploy to enable debug mode.
 httpServer.on("upgrade", (req) => {
   const hasAuth  = !!req.headers["authorization"];
   const hasToken = (req.url ?? "").includes("token=");
-  log("INFO", `WS upgrade request`, {
-    url:       req.url,
-    authHeader: hasAuth  ? "Bearer ***" : "MISSING",
-    tokenParam: hasToken ? "present"    : "absent",
-    origin:    req.headers["origin"] ?? "none",
-    userAgent: (req.headers["user-agent"] ?? "none").slice(0, 60),
+  logInfo(`WS upgrade`, {
+    url:        req.url,
+    authHeader: hasAuth  ? "yes" : "MISSING",
+    tokenParam: hasToken ? "yes" : "no",
   });
 });
 
@@ -297,7 +314,7 @@ if (existsSync(PUBLIC_DIR)) {
       },
     }),
   );
-  log("INFO", "Serving markdown docs from /public");
+  logDebug("Serving markdown docs from /public");
 }
 
 // ---------------------------------------------------------------------------
@@ -310,9 +327,9 @@ if (existsSync(UI_DIST)) {
   httpApp.get(/^(?!\/api|\/health|\/gateway).*/, (_req: Request, res: Response): void => {
     res.sendFile(path.join(UI_DIST, "index.html"));
   });
-  log("INFO", "Serving React UI", { path: UI_DIST });
+  logInfo("Serving React UI", { path: UI_DIST });
 } else {
-  log("WARN", "UI dist not found — run `npm run build -w packages/ui` first");
+  logWarn("UI dist not found — run `npm run build -w packages/ui` first");
 }
 
 // ---------------------------------------------------------------------------
@@ -320,13 +337,15 @@ if (existsSync(UI_DIST)) {
 // ---------------------------------------------------------------------------
 
 httpServer.listen(PORT, () => {
-  log("INFO", "PokerCrawl server started", { port: PORT });
-  log("INFO", `  → HTTP:          http://localhost:${PORT}`);
-  log("INFO", `  → WS (UI):       ws://localhost:${PORT}/ws-ui`);
-  log("INFO", `  → WS (Agents):   ws://localhost:${PORT}/ws`);
-  log("INFO", `  → Gateway:       http://localhost:${PORT}/gateway/*`);
-  log("INFO", `  → Health:        http://localhost:${PORT}/health`);
-  log("INFO", `  → Skill:         http://localhost:${PORT}/skill.md`);
+  logInfo(`PokerCrawl v${VERSION} started`, {
+    port: PORT,
+    env:  IS_PROD ? "production" : "development",
+    bots: BOT_COUNT,
+  });
+  logDebug(`  → HTTP:        http://localhost:${PORT}`);
+  logDebug(`  → WS (UI):     ws://localhost:${PORT}/ws-ui`);
+  logDebug(`  → WS (Agents): ws://localhost:${PORT}/ws`);
+  logDebug(`  → Gateway:     http://localhost:${PORT}/gateway/*`);
 });
 
 // ---------------------------------------------------------------------------
@@ -348,8 +367,14 @@ const BOT_CLASSES = [
 const BOT_IDS  = ["shark", "rock", "mago", "caos", "reloj", "wolf", "owl", "turtle", "fox"];
 const TABLE_ID = "main";
 
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+// In production, slow the game loop to reduce log volume and CPU pressure on Railway.
+const HAND_DELAY_MS   = IS_PROD ? 2_000 : 0;
+const ACTION_DELAY_MS = IS_PROD ?   200 : 0;
+
 async function runSession(sessionN: number): Promise<void> {
-  log("INFO", `Starting session ${sessionN}`, { table: TABLE_ID, botCount: BOT_COUNT });
+  logDebug(`Starting session ${sessionN}`, { table: TABLE_ID, botCount: BOT_COUNT });
 
   const store = new GameStore();
   const orch  = new AgentOrchestrator(store, {
@@ -368,7 +393,7 @@ async function runSession(sessionN: number): Promise<void> {
   }
 
   for (const agent of agents) orch.registerAgent(agent);
-  log("INFO", "Agents registered", { agents: agents.map((a) => a.id ?? "?") });
+  logDebug("Agents registered", { agents: agents.map((a) => a.id ?? "?") });
 
   orch.on("decision", ({ agentId, decision }: { agentId: string; decision: { action: string; amount?: number } }) => {
     const record = store.getTable(TABLE_ID);
@@ -379,7 +404,8 @@ async function runSession(sessionN: number): Promise<void> {
         amount: decision.amount ?? 0,
       });
     }
-    log("INFO", "Decision", { agentId, action: decision.action, amount: decision.amount });
+    // Individual bot decisions — debug only (very high frequency in production)
+    logDebug("Decision", { agentId, action: decision.action, amount: decision.amount });
     recentActivity.unshift({
       agentId,
       action:  decision.action,
@@ -392,14 +418,15 @@ async function runSession(sessionN: number): Promise<void> {
 
   orch.on("chat", ({ agentId, message }: { agentId: string; message: string }) => {
     uiBridge.broadcastChat(TABLE_ID, agentId, message);
-    log("INFO", "Chat", { agentId, message });
+    // Bot chat — debug only (can be dozens of messages per hand)
+    logDebug("Chat", { agentId, message: message.slice(0, 60) });
   });
 
   orch.on("hand_complete", (result: HandResult) => {
     totalHands++;
     const record = store.getTable(TABLE_ID);
     if (record) uiBridge.broadcastFullSnapshot(TABLE_ID, record);
-    // Update ELO — increment hand count for all active agents this session
+    // Update ELO
     for (const id of seenAgentIds) {
       const r = eloMap.get(id);
       if (r) r.hands++;
@@ -408,22 +435,30 @@ async function runSession(sessionN: number): Promise<void> {
       const r = eloMap.get(winner.agentId);
       if (r) { r.wins++; r.elo = Math.min(2000, r.elo + Math.floor(winner.amountWon / 10)); }
     }
-    const wins = result.winners.map((w) => `${w.agentId}+${w.amountWon}`).join(", ");
-    log("INFO", "Hand complete", { handNumber: result.handNumber, winners: wins });
+    // In production: log a milestone summary every 10 hands instead of every hand.
+    // In development: log every hand.
+    if (!IS_PROD || totalHands % 10 === 0) {
+      const wins = result.winners.map((w) => `${w.agentId}+${w.amountWon}`).join(", ");
+      logInfo("Hand milestone", { totalHands, handNumber: result.handNumber, winners: wins });
+    }
   });
 
   try {
-    await orch.playTournament(9_999, { decisionTimeoutMs: 15_000 });
+    await orch.playTournament(9_999, {
+      decisionTimeoutMs: 15_000,
+      handDelayMs:       HAND_DELAY_MS,
+      actionDelayMs:     ACTION_DELAY_MS,
+    });
   } catch (err) {
-    log("ERROR", "Session error", {
+    logError("Session error", {
       error: err instanceof Error ? err.message : String(err),
     });
   }
 }
 
-log("INFO", `Starting bot game loop`, { botCount: BOT_COUNT });
+logInfo(`Bot game loop starting`, { botCount: BOT_COUNT, handDelayMs: HAND_DELAY_MS, actionDelayMs: ACTION_DELAY_MS });
 let sessionN = 1;
 for (;;) {
   await runSession(sessionN++);
-  await new Promise<void>((r) => setTimeout(r, 2_000));
+  await sleep(IS_PROD ? 5_000 : 2_000); // longer pause between sessions in prod
 }

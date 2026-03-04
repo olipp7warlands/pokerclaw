@@ -130,7 +130,7 @@ export class AgentOrchestrator extends EventEmitter {
    * Returns a HandResult once the hand reaches a non-betting phase.
    */
   async playHand(
-    opts: { decisionTimeoutMs?: number; smallBlind?: number; bigBlind?: number; ante?: number } = {}
+    opts: { decisionTimeoutMs?: number; smallBlind?: number; bigBlind?: number; ante?: number; actionDelayMs?: number; handDelayMs?: number } = {}
   ): Promise<HandResult> {
     await this.setup();
 
@@ -181,6 +181,11 @@ export class AgentOrchestrator extends EventEmitter {
       }
 
       this._applyDecision(state, record, agentId, decision);
+
+      // Pace control — slows action loop to reduce log/CPU pressure.
+      if (opts.actionDelayMs && opts.actionDelayMs > 0) {
+        await new Promise<void>((r) => setTimeout(r, opts.actionDelayMs));
+      }
     }
 
     const result = this._collectResult(record);
@@ -194,7 +199,7 @@ export class AgentOrchestrator extends EventEmitter {
    */
   async playTournament(
     maxHands = 100,
-    opts: { decisionTimeoutMs?: number } = {}
+    opts: { decisionTimeoutMs?: number; handDelayMs?: number; actionDelayMs?: number } = {}
   ): Promise<TournamentResult> {
     await this.setup();
 
@@ -212,6 +217,11 @@ export class AgentOrchestrator extends EventEmitter {
 
       for (const w of result.winners) {
         handsWon[w.agentId] = (handsWon[w.agentId] ?? 0) + 1;
+      }
+
+      // Pace control — reduces CPU/log pressure on hosted environments.
+      if (opts.handDelayMs && opts.handDelayMs > 0) {
+        await new Promise<void>((r) => setTimeout(r, opts.handDelayMs));
       }
     }
 
@@ -249,10 +259,12 @@ export class AgentOrchestrator extends EventEmitter {
     } catch (e) {
       this.emit("timeout", { agentId: agent.id });
       this.emit("agent_error", { agentId: agent.id, error: e });
-      console.warn(
-        `[Orchestrator] ${agent.id} timed out or errored — auto-folding:`,
-        e instanceof Error ? e.message : e
-      );
+      if (process.env["NODE_ENV"] !== "production") {
+        console.warn(
+          `[Orchestrator] ${agent.id} timed out or errored — auto-folding:`,
+          e instanceof Error ? e.message : e
+        );
+      }
       return { action: "fold", reasoning: "auto-fold: timeout or error", confidence: 0 };
     }
   }
@@ -313,10 +325,12 @@ export class AgentOrchestrator extends EventEmitter {
       this.store.notify(this.config.tableId, record);
     } catch (e) {
       // Invalid action — fold as safety net
-      console.warn(
-        `[Orchestrator] Invalid action "${decision.action}" for ${agentId}: ` +
-          `${e instanceof Error ? e.message : e} — falling back to fold`
-      );
+      if (process.env["NODE_ENV"] !== "production") {
+        console.warn(
+          `[Orchestrator] Invalid action "${decision.action}" for ${agentId}: ` +
+            `${e instanceof Error ? e.message : e} — falling back to fold`
+        );
+      }
       try {
         processAction(state, { agentId, type: "fold", amount: 0 });
         this.store.notify(this.config.tableId, record);
