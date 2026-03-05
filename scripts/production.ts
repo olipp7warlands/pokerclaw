@@ -420,6 +420,11 @@ async function runSession(sessionN: number): Promise<void> {
   httpAgentBridge.setBotStore(store, TABLE_ID, 500);
   httpAgentBridge.setOrchestrator(orch);
 
+  // Wire external WS agents (OpenClaw / WebSocket clients) into the same store.
+  // join_table "main" will cross-seat them alongside the bots.
+  agentBridge.setBotStore(store, TABLE_ID, 500);
+  agentBridge.setOrchestrator(orch);
+
   const agents: BaseAgent[] = [];
   for (let i = 0; i < BOT_COUNT; i++) {
     const Cls = BOT_CLASSES[i % BOT_CLASSES.length]!;
@@ -492,6 +497,7 @@ async function runSession(sessionN: number): Promise<void> {
   } finally {
     // Detach orchestrator — external agents will be re-registered on next session.
     httpAgentBridge.setOrchestrator(null);
+    agentBridge.setOrchestrator(null);
   }
 }
 

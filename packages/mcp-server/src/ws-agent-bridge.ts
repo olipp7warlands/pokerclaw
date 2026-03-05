@@ -86,6 +86,29 @@ interface SeatSummary {
 }
 
 // ---------------------------------------------------------------------------
+// Bot-store / orchestrator integration types
+// (Defined locally to avoid circular dep with http-agent-bridge)
+// ---------------------------------------------------------------------------
+
+interface _IOrchestratorForWs {
+  registerExternalAgent(agentId: string, decide: (ctx: unknown) => Promise<_WsExternalDecision>): void;
+  unregisterExternalAgent(agentId: string): void;
+}
+
+interface _WsExternalDecision {
+  action:     string;
+  amount?:    number;
+  confidence: number;
+  reasoning?: string;
+}
+
+interface _PendingWsDecision {
+  resolve: (d: _WsExternalDecision) => void;
+  reject:  (e: Error) => void;
+  timer:   ReturnType<typeof setTimeout>;
+}
+
+// ---------------------------------------------------------------------------
 // WsAgentBridge
 // ---------------------------------------------------------------------------
 
@@ -96,6 +119,13 @@ export class WsAgentBridge {
   private readonly _connections= new Map<string, WebSocket>(); // agentId → ws
   private _httpServer: http.Server | null = null;
   private _wss:        WebSocketServer | null = null;
+
+  // --- Bot-store / orchestrator integration (mirrors HttpAgentBridge) ---
+  private _botStore:     GameStore | null          = null;
+  private _botTableId                              = "main";
+  private _botTokens                               = 1_000;
+  private _orchestratorWs: _IOrchestratorForWs | null = null;
+  private readonly _pendingWsDecisions = new Map<string, _PendingWsDecision>();
 
   constructor(store: GameStore, port = 3002) {
     this._store = store;
@@ -252,6 +282,41 @@ export class WsAgentBridge {
   }
 
   // -------------------------------------------------------------------------
+  // Bot-store / orchestrator integration (mirrors HttpAgentBridge)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Provide the bot-game store so WS agents are cross-seated when they join.
+   * Call once after construction; stable across sessions.
+   */
+  setBotStore(store: GameStore, tableId = "main", initialTokens = 1_000): void {
+    this._botStore   = store;
+    this._botTableId = tableId;
+    this._botTokens  = initialTokens;
+    store.onUpdate((tId, record) => {
+      if (tId !== this._botTableId) return;
+      this._onBotStoreUpdate(tId, record);
+    });
+  }
+
+  /**
+   * Set (or clear) the current orchestrator.
+   * Called at the start of each game session (and with null when it ends).
+   * On set: re-registers all connected WS agents that are already cross-seated.
+   */
+  setOrchestrator(orch: _IOrchestratorForWs | null): void {
+    this._orchestratorWs = orch;
+    if (orch) {
+      for (const [agentId, ws] of this._connections) {
+        if (this._botStore?.getTable(this._botTableId)?.agents.has(agentId)) {
+          this._crossSeatAndRegisterWs(agentId, ws);
+        }
+      }
+    }
+    // If orch === null: pending decisions time out naturally (30 s → fold).
+  }
+
+  // -------------------------------------------------------------------------
   // WebSocket connection handling
   // -------------------------------------------------------------------------
 
@@ -394,31 +459,43 @@ export class WsAgentBridge {
           capabilities:   agent.capabilities,
           initial_tokens: cmd.tokens ?? 1_000,
         }, this._store);
+
+        // Cross-seat into bot store + register with orchestrator when joining the bot table
+        if (result.success && cmd.tableId === this._botTableId) {
+          this._crossSeatAndRegisterWs(agent.agentId, ws);
+        }
+
         this._send(ws, { event: "action_result", ...result });
         break;
       }
 
       // ── Betting actions ─────────────────────────────────────────────────
+      // When this agent has a pending orchestrator decision, resolve it (don't apply
+      // the action to agentStore directly — the orchestrator applies it to the bot store).
       case "fold": {
         const r = this._requireTable(cmd, agent.agentId)
+          ?? this._resolveWsDecision(agent.agentId, { action: "fold", confidence: 0.5 })
           ?? fold({ tableId: cmd.tableId!, agentId: agent.agentId }, this._store);
         this._send(ws, { event: "action_result", ...r });
         break;
       }
       case "call": {
         const r = this._requireTable(cmd, agent.agentId)
+          ?? this._resolveWsDecision(agent.agentId, { action: "call", confidence: 0.5 })
           ?? call({ tableId: cmd.tableId!, agentId: agent.agentId }, this._store);
         this._send(ws, { event: "action_result", ...r });
         break;
       }
       case "check": {
         const r = this._requireTable(cmd, agent.agentId)
+          ?? this._resolveWsDecision(agent.agentId, { action: "check", confidence: 0.5 })
           ?? check({ tableId: cmd.tableId!, agentId: agent.agentId }, this._store);
         this._send(ws, { event: "action_result", ...r });
         break;
       }
       case "all_in": {
         const r = this._requireTable(cmd, agent.agentId)
+          ?? this._resolveWsDecision(agent.agentId, { action: "all-in", confidence: 0.5 })
           ?? allIn({ tableId: cmd.tableId!, agentId: agent.agentId }, this._store);
         this._send(ws, { event: "action_result", ...r });
         break;
@@ -428,7 +505,8 @@ export class WsAgentBridge {
           this._send(ws, { event: "error", message: '"tableId" and "amount" required' });
           break;
         }
-        const r = bet({ tableId: cmd.tableId, agentId: agent.agentId, amount: cmd.amount }, this._store);
+        const r = this._resolveWsDecision(agent.agentId, { action: "bet", amount: cmd.amount, confidence: 0.5 })
+          ?? bet({ tableId: cmd.tableId, agentId: agent.agentId, amount: cmd.amount }, this._store);
         this._send(ws, { event: "action_result", ...r });
         break;
       }
@@ -437,7 +515,8 @@ export class WsAgentBridge {
           this._send(ws, { event: "error", message: '"tableId" and "amount" required' });
           break;
         }
-        const r = raise({ tableId: cmd.tableId, agentId: agent.agentId, amount: cmd.amount }, this._store);
+        const r = this._resolveWsDecision(agent.agentId, { action: "raise", amount: cmd.amount, confidence: 0.5 })
+          ?? raise({ tableId: cmd.tableId, agentId: agent.agentId, amount: cmd.amount }, this._store);
         this._send(ws, { event: "action_result", ...r });
         break;
       }
@@ -475,6 +554,116 @@ export class WsAgentBridge {
   private _requireTable(cmd: WsCommand, _agentId: string) {
     if (!cmd.tableId) return { success: false, message: '"tableId" required' };
     return undefined;
+  }
+
+  // -------------------------------------------------------------------------
+  // Bot-store / orchestrator private helpers
+  // -------------------------------------------------------------------------
+
+  /**
+   * Cross-seat the agent in the bot store and register a decide() callback
+   * with the orchestrator so the betting loop waits for their WS actions.
+   */
+  private _crossSeatAndRegisterWs(agentId: string, _ws: WebSocket): void {
+    if (this._botStore) {
+      try {
+        joinTable({
+          tableId:        this._botTableId,
+          agentId,
+          capabilities:   this._agents.get(agentId)?.capabilities ?? [],
+          initial_tokens: this._botTokens,
+        }, this._botStore);
+      } catch {
+        // Already seated — fine, persists across sessions
+      }
+    }
+
+    if (!this._orchestratorWs) return;
+
+    const self     = this;
+    const TIMEOUT  = 30_000;
+
+    const decide = (_ctx: unknown): Promise<_WsExternalDecision> =>
+      new Promise<_WsExternalDecision>((resolve, reject) => {
+        // Cancel any leftover pending decision from a previous hand
+        const prev = self._pendingWsDecisions.get(agentId);
+        if (prev) {
+          clearTimeout(prev.timer);
+          prev.reject(new Error("superseded by new turn"));
+          self._pendingWsDecisions.delete(agentId);
+        }
+
+        const timer = setTimeout(() => {
+          if (self._pendingWsDecisions.has(agentId)) {
+            self._pendingWsDecisions.delete(agentId);
+            resolve({ action: "fold", confidence: 0, reasoning: "timeout 30s" });
+          }
+        }, TIMEOUT);
+
+        self._pendingWsDecisions.set(agentId, { resolve, reject, timer });
+        // The your_turn event is sent by _onBotStoreUpdate when the bot store notifies
+      });
+
+    this._orchestratorWs.registerExternalAgent(agentId, decide);
+  }
+
+  /**
+   * Resolve the orchestrator's pending WS decision with the action the agent just sent.
+   * Returns an action_result ToolResult if a decision was pending, or undefined if not.
+   */
+  private _resolveWsDecision(
+    agentId:  string,
+    decision: _WsExternalDecision,
+  ): { success: boolean; message: string } | undefined {
+    const pending = this._pendingWsDecisions.get(agentId);
+    if (!pending) return undefined;
+    clearTimeout(pending.timer);
+    this._pendingWsDecisions.delete(agentId);
+    pending.resolve(decision);
+    return { success: true, message: "Action submitted to game" };
+  }
+
+  /**
+   * Fan-out bot-store state changes to connected WS agents seated at that table.
+   * Mirrors _onStoreUpdate but listens to the bot store (where the orchestrator runs).
+   */
+  private _onBotStoreUpdate(tableId: string, record: TableRecord): void {
+    try {
+      const { state } = record;
+
+      for (const [agentId, ws] of this._connections) {
+        if (!record.agents.has(agentId)) continue;
+        if (ws.readyState !== WebSocket.OPEN) continue;
+
+        this._send(ws, this._buildGameUpdate(tableId, record));
+
+        if (state.phase === "settlement") {
+          this._send(ws, {
+            event:      "hand_complete",
+            tableId,
+            handNumber: state.handNumber,
+            winners:    state.winners as unknown[],
+          });
+          continue;
+        }
+
+        if (
+          state.phase !== "waiting"   &&
+          state.phase !== "showdown"  &&
+          state.phase !== "execution"
+        ) {
+          const actionSeat = state.seats[state.actionOnIndex];
+          if (actionSeat?.agentId === agentId && actionSeat.status === "active") {
+            this._send(ws, this._buildYourTurn(tableId, record, actionSeat));
+          }
+        }
+      }
+    } catch (err) {
+      console.error(
+        `[${new Date().toISOString()}] ERROR [WsAgentBridge] Error in bot store update` +
+        ` for table "${tableId}": ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   // -------------------------------------------------------------------------
