@@ -20,6 +20,132 @@ interface Props {
 }
 
 // ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+interface ApiTable {
+  id: string; name: string; smallBlind: number; bigBlind: number;
+  maxPlayers: number; players: number; pot: number; status: string;
+}
+
+interface ApiStats {
+  totalHands:   number;
+  totalAgents:  number;
+  onlineAgents: number;
+  activeTables: number;
+}
+
+interface PrizePool {
+  total:      number;
+  byProvider: Record<string, number>;
+  valueUSD:   number;
+}
+
+function mapApiTable(t: ApiTable): LobbyTable {
+  return {
+    id:             t.id,
+    name:           t.name,
+    blinds:         { small: t.smallBlind, big: t.bigBlind },
+    currentPlayers: t.players,
+    maxSeats:       t.maxPlayers,
+    avgPot:         t.pot,
+    type:           "cash",
+    status:         t.status === "active" ? "playing" : "waiting",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1_000)     return (n / 1_000).toFixed(1) + "K";
+  return String(Math.round(n));
+}
+
+// ---------------------------------------------------------------------------
+// HeaderStats — sticky bar at top of lobby
+// ---------------------------------------------------------------------------
+
+interface HeaderStatsProps {
+  stats:     ApiStats | null;
+  prizePool: PrizePool | null;
+}
+
+function HeaderStats({ stats, prizePool }: HeaderStatsProps) {
+  const hands  = stats?.totalHands   ?? 0;
+  const agents = stats?.totalAgents  ?? 0;
+  const tables = stats?.activeTables ?? 0;
+  const online = stats?.onlineAgents ?? 0;
+
+  const hasPrize = prizePool && prizePool.total > 0;
+
+  return (
+    <div
+      style={{
+        position:      "sticky",
+        top:           0,
+        zIndex:        100,
+        background:    "rgba(0,0,0,0.85)",
+        borderBottom:  "1px solid rgba(212,175,55,0.18)",
+        backdropFilter: "blur(8px)",
+        padding:       "10px 24px",
+        display:       "flex",
+        alignItems:    "center",
+        justifyContent: "center",
+        gap:           0,
+        flexShrink:    0,
+      }}
+    >
+      <StatBlock icon="🃏" value={hands}  label="HANDS"  />
+      <Divider />
+      <StatBlock icon="🤖" value={agents} label="AGENTS" />
+      <Divider />
+      <StatBlock icon="🎰" value={tables} label="TABLES" />
+      <Divider />
+      <StatBlock icon="⚡" value={online} label="ONLINE" />
+
+      {hasPrize && (
+        <>
+          <Divider />
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "0 20px" }}>
+            <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", fontFamily: "monospace", letterSpacing: "0.1em", marginBottom: 2 }}>
+              💰 PRIZE POOL
+            </span>
+            <span style={{ fontSize: 24, color: "#d4af37", fontFamily: "monospace", fontWeight: 700, lineHeight: 1 }}>
+              {fmtTokens(prizePool.total)}
+              <span style={{ fontSize: 13, color: "rgba(212,175,55,0.55)", marginLeft: 6 }}>
+                (~${prizePool.valueUSD < 1 ? prizePool.valueUSD.toFixed(2) : prizePool.valueUSD.toFixed(0)})
+              </span>
+            </span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function StatBlock({ icon, value, label }: { icon: string; value: number; label: string }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "0 20px" }}>
+      <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", fontFamily: "monospace", letterSpacing: "0.1em", marginBottom: 2 }}>
+        {icon} {label}
+      </span>
+      <span style={{ fontSize: 24, color: "#d4af37", fontFamily: "monospace", fontWeight: 700, lineHeight: 1 }}>
+        {value.toLocaleString()}
+      </span>
+    </div>
+  );
+}
+
+function Divider() {
+  return (
+    <div style={{ width: 1, height: 32, background: "rgba(212,175,55,0.15)", flexShrink: 0 }} />
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Section wrapper
 // ---------------------------------------------------------------------------
 
@@ -50,60 +176,40 @@ function Section({
 // LobbyScreen
 // ---------------------------------------------------------------------------
 
-interface ApiTable {
-  id: string; name: string; smallBlind: number; bigBlind: number;
-  maxPlayers: number; players: number; pot: number; status: string;
-}
-
-interface PrizePool {
-  total: number;
-  byProvider: Record<string, number>;
-  valueUSD: number;
-}
-
-function mapApiTable(t: ApiTable): LobbyTable {
-  return {
-    id:             t.id,
-    name:           t.name,
-    blinds:         { small: t.smallBlind, big: t.bigBlind },
-    currentPlayers: t.players,
-    maxSeats:       t.maxPlayers,
-    avgPot:         t.pot,
-    type:           "cash",
-    status:         t.status === "active" ? "playing" : "waiting",
-  };
-}
-
 export function LobbyScreen({ initialTables, onJoinTable, onWatchTable, onTableCreated }: Props) {
   const [tables,      setTables]      = useState<LobbyTable[]>(initialTables ?? DEMO_TABLES);
   const [tournaments, setTournaments] = useState<LobbyTournament[]>(DEMO_TOURNAMENTS);
+  const [stats,       setStats]       = useState<ApiStats | null>(null);
   const [prizePool,   setPrizePool]   = useState<PrizePool | null>(null);
   const [createModalOpen, setCreate]  = useState(false);
 
-  // Poll /api/tables, /api/tournaments and /api/prizepool every 3 s for live data
+  // Poll /api/tables, /api/tournaments, /api/stats, /api/prizepool every 3s
   useEffect(() => {
     let cancelled = false;
     async function poll() {
       try {
-        const [tablesRes, tournamentsRes, ppRes] = await Promise.all([
+        const [tablesRes, tournamentsRes, statsRes, ppRes] = await Promise.all([
           fetch("/api/tables"),
           fetch("/api/tournaments"),
+          fetch("/api/stats"),
           fetch("/api/prizepool"),
         ]);
-        if (!cancelled) {
-          if (tablesRes.ok) {
-            const data: ApiTable[] = await tablesRes.json() as ApiTable[];
-            // Always update from server when server responds (even with fewer tables than demo)
-            setTables(data.map(mapApiTable));
-          }
-          if (tournamentsRes.ok) {
-            const data: LobbyTournament[] = await tournamentsRes.json() as LobbyTournament[];
-            setTournaments(data.length > 0 ? data : DEMO_TOURNAMENTS);
-          }
-          if (ppRes.ok) {
-            const data = await ppRes.json() as PrizePool;
-            setPrizePool(data);
-          }
+        if (cancelled) return;
+        if (tablesRes.ok) {
+          const data: ApiTable[] = await tablesRes.json() as ApiTable[];
+          setTables(data.map(mapApiTable));
+        }
+        if (tournamentsRes.ok) {
+          const data: LobbyTournament[] = await tournamentsRes.json() as LobbyTournament[];
+          setTournaments(data.length > 0 ? data : DEMO_TOURNAMENTS);
+        }
+        if (statsRes.ok) {
+          const data: ApiStats = await statsRes.json() as ApiStats;
+          setStats(data);
+        }
+        if (ppRes.ok) {
+          const data = await ppRes.json() as PrizePool;
+          setPrizePool(data);
         }
       } catch { /* network error — keep previous data */ }
     }
@@ -117,26 +223,10 @@ export function LobbyScreen({ initialTables, onJoinTable, onWatchTable, onTableC
     onTableCreated?.(table);
   }
 
-  // Quick stats
-  const totalAgents       = tables.reduce((s, t) => s + t.currentPlayers, 0);
-  const activeTournaments = tournaments.filter((t) => t.status !== "complete").length;
-  const leaderboardCount  = DEMO_LEADERBOARD.length;
-
   return (
     <>
-      {/* ── Stats bar ── */}
-      <div
-        className="shrink-0 px-6 py-1.5 border-b border-white/5 flex items-center justify-center gap-4"
-        style={{ background: "rgba(0,0,0,0.25)" }}
-      >
-        <StatPill icon="🤖" value={leaderboardCount} label="agents" />
-        <Dot />
-        <StatPill icon="🎰" value={tables.length}     label="tables" />
-        <Dot />
-        <StatPill icon="🏆" value={activeTournaments}  label="tournaments" />
-        <Dot />
-        <StatPill icon="⚡" value={totalAgents}         label="playing now" />
-      </div>
+      {/* ── Sticky header stats bar ── */}
+      <HeaderStats stats={stats} prizePool={prizePool} />
 
       {/* ── Main content — max-width 1200px centered ── */}
       <div className="flex flex-1 overflow-hidden justify-center">
@@ -157,11 +247,6 @@ export function LobbyScreen({ initialTables, onJoinTable, onWatchTable, onTableC
                 ))}
               </div>
             </Section>
-
-            {/* Prize Pool */}
-            {prizePool && prizePool.total > 0 && (
-              <PrizePoolBar pool={prizePool} />
-            )}
 
             {/* Cash Tables */}
             <Section
@@ -218,7 +303,6 @@ export function LobbyScreen({ initialTables, onJoinTable, onWatchTable, onTableC
               <LeaderboardPanel entries={DEMO_LEADERBOARD} />
             </Section>
 
-            {/* Footer stats */}
             <div className="mt-auto pt-3 border-t border-white/5">
               <p className="text-[9px] font-mono text-white/18 text-center leading-relaxed">
                 ELO ratings update after each completed hand
@@ -235,97 +319,4 @@ export function LobbyScreen({ initialTables, onJoinTable, onWatchTable, onTableC
       />
     </>
   );
-}
-
-// ---------------------------------------------------------------------------
-// PrizePoolBar
-// ---------------------------------------------------------------------------
-
-const PROVIDER_LABELS: Record<string, string> = {
-  anthropic: "Claude",
-  openai:    "GPT",
-  google:    "Gemini",
-  simulated: "Simulated",
-};
-const PROVIDER_COLORS: Record<string, string> = {
-  anthropic: "#d4af37",
-  openai:    "#60a5fa",
-  google:    "#4ade80",
-  simulated: "#94a3b8",
-};
-
-function fmtTokens(n: number): string {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
-  if (n >= 1_000)     return (n / 1_000).toFixed(1) + "K";
-  return String(Math.round(n));
-}
-
-function PrizePoolBar({ pool }: { pool: PrizePool }) {
-  const providers = Object.entries(pool.byProvider).filter(([, v]) => v > 0);
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: -4 }}
-      animate={{ opacity: 1, y: 0 }}
-      style={{
-        background:   "linear-gradient(135deg, rgba(212,175,55,0.08), rgba(0,0,0,0))",
-        border:       "1px solid rgba(212,175,55,0.2)",
-        borderRadius: 10,
-        padding:      "12px 16px",
-        display:      "flex",
-        alignItems:   "center",
-        gap:          16,
-      }}
-    >
-      <div style={{ display: "flex", flexDirection: "column", minWidth: 90 }}>
-        <span className="text-[10px] font-mono text-white/35 uppercase tracking-widest">Prize Pool</span>
-        <span className="text-lg font-bold font-mono" style={{ color: "#d4af37", lineHeight: 1.2 }}>
-          {fmtTokens(pool.total)}
-        </span>
-        <span className="text-[10px] font-mono text-white/30">≈ ${pool.valueUSD.toFixed(2)} USD</span>
-      </div>
-
-      <div className="flex-1 flex items-center gap-1 flex-wrap">
-        {providers.length > 0 ? (
-          providers.map(([key, val]) => (
-            <span
-              key={key}
-              className="px-2 py-0.5 text-[10px] font-mono rounded-full"
-              style={{
-                background: `${PROVIDER_COLORS[key] ?? "#94a3b8"}18`,
-                border:     `1px solid ${PROVIDER_COLORS[key] ?? "#94a3b8"}40`,
-                color:      PROVIDER_COLORS[key] ?? "#94a3b8",
-              }}
-            >
-              {fmtTokens(val)} {PROVIDER_LABELS[key] ?? key}
-            </span>
-          ))
-        ) : (
-          <span className="text-[10px] font-mono text-white/25">No active games</span>
-        )}
-      </div>
-
-      <div
-        className="w-2 h-2 rounded-full flex-shrink-0 animate-pulse"
-        style={{ background: "#d4af37", boxShadow: "0 0 6px rgba(212,175,55,0.7)" }}
-      />
-    </motion.div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function StatPill({ icon, value, label }: { icon: string; value: number; label: string }) {
-  return (
-    <span className="flex items-center gap-1 text-[10px] font-mono text-white/30">
-      <span>{icon}</span>
-      <span className="font-bold text-white/50 tabular-nums">{value}</span>
-      <span>{label}</span>
-    </span>
-  );
-}
-
-function Dot() {
-  return <span className="text-white/12 text-[10px]">·</span>;
 }

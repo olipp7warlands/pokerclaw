@@ -62,12 +62,12 @@ export function CashTableRow({ table, index, onJoin, onWatch }: Props) {
 
       {/* Avg pot */}
       <td className="py-2 px-3 text-xs font-mono text-white/45">
-        {formatTokens(table.avgPot)}
+        {table.avgPot > 0 ? formatTokens(table.avgPot) : <span className="text-white/20">—</span>}
       </td>
 
       {/* USD estimate — right aligned */}
       <td className="py-2 px-3 text-xs font-mono text-white/28 text-right">
-        {potToDisplayUSD(table.avgPot)}
+        {table.avgPot > 0 ? potToDisplayUSD(table.avgPot) : <span className="text-white/15">—</span>}
       </td>
 
       {/* Action */}
