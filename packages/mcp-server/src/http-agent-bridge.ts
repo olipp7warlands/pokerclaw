@@ -111,8 +111,8 @@ export class HttpAgentBridge {
   /** tableId → bot table entry (store + orchestrator + default tokens) */
   private readonly _botTables = new Map<string, { store: GameStore; orch: IExternalOrchestrator; tokens: number }>();
 
-  /** Called when a joining agent requests a table that is full; returns a new tableId or undefined. */
-  private _onTableFull?: () => string | undefined;
+  /** Called when a joining agent's target table is full; receives base tableId, returns overflow tableId. */
+  private _onTableFull?: (baseTableId: string) => string | undefined;
 
   constructor(
     store: GameStore,
@@ -159,8 +159,8 @@ export class HttpAgentBridge {
     this._botTables.delete(tableId);
   }
 
-  /** Callback invoked when a joining agent's target table is full. Returns a new tableId or undefined. */
-  setOnTableFull(cb: () => string | undefined): void {
+  /** Callback invoked when a joining agent's target table is full. Receives base tableId, returns overflow tableId. */
+  setOnTableFull(cb: (baseTableId: string) => string | undefined): void {
     this._onTableFull = cb;
   }
 
@@ -271,10 +271,24 @@ export class HttpAgentBridge {
       }
 
       case "join_table": {
-        const targetTableId = (!cmd.tableId || cmd.tableId === "auto")
-          ? (this._findBestBotTable() ?? this._onTableFull?.())
-          : cmd.tableId;
-        if (!targetTableId) return { event: "error", message: '"tableId" required' };
+        let targetTableId: string | undefined;
+
+        if (!cmd.tableId || cmd.tableId === "auto") {
+          targetTableId = this._findBestBotTable() ?? this._onTableFull?.("beginners");
+        } else {
+          const entry = this._botTables.get(cmd.tableId);
+          if (entry) {
+            const record = entry.store.getTable(cmd.tableId);
+            const space  = record ? record.config.maxPlayers - record.state.seats.length : 0;
+            targetTableId = space > 0
+              ? cmd.tableId
+              : (this._findBestBotTable() ?? this._onTableFull?.(cmd.tableId));
+          } else {
+            targetTableId = cmd.tableId;
+          }
+        }
+
+        if (!targetTableId) return { event: "error", message: "All tables are full and no overflow could be created" };
 
         const r = joinTable({
           tableId:        targetTableId,

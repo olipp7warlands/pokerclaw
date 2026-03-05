@@ -122,8 +122,8 @@ export class WsAgentBridge {
 
   // --- Multi-table bot-store / orchestrator integration ---
   private readonly _botTables = new Map<string, { store: GameStore; orch: _IOrchestratorForWs; tokens: number }>();
-  /** Optional callback invoked when all bot tables are full; returns a new tableId or undefined. */
-  private _onTableFullWs?: () => string | undefined;
+  /** Invoked when a target bot table is full; receives the base tableId, returns the overflow tableId. */
+  private _onTableFullWs?: (baseTableId: string) => string | undefined;
   private readonly _pendingWsDecisions = new Map<string, _PendingWsDecision>();
 
   constructor(store: GameStore, port = 3002) {
@@ -312,7 +312,7 @@ export class WsAgentBridge {
    * Optional callback invoked when all bot tables are full and an agent needs
    * auto-assignment. Should return the new tableId or undefined on failure.
    */
-  setOnTableFull(cb: () => string | undefined): void {
+  setOnTableFull(cb: (baseTableId: string) => string | undefined): void {
     this._onTableFullWs = cb;
   }
 
@@ -449,13 +449,27 @@ export class WsAgentBridge {
 
       // ── Table join ─────────────────────────────────────────────────────
       case "join_table": {
-        // Auto-assign: empty or "auto" tableId → table with most free seats
-        const targetTableId = (!cmd.tableId || cmd.tableId === "auto")
-          ? (this._findBestBotTable() ?? this._onTableFullWs?.())
-          : cmd.tableId;
+        let targetTableId: string | undefined;
+
+        if (!cmd.tableId || cmd.tableId === "auto") {
+          // Auto-assign: table with most free seats, or create overflow
+          targetTableId = this._findBestBotTable() ?? this._onTableFullWs?.("beginners");
+        } else {
+          // Specific table requested: check if it's a known bot table and has room
+          const entry = this._botTables.get(cmd.tableId);
+          if (entry) {
+            const record = entry.store.getTable(cmd.tableId);
+            const space  = record ? record.config.maxPlayers - record.state.seats.length : 0;
+            targetTableId = space > 0
+              ? cmd.tableId
+              : (this._findBestBotTable() ?? this._onTableFullWs?.(cmd.tableId));
+          } else {
+            targetTableId = cmd.tableId;
+          }
+        }
 
         if (!targetTableId) {
-          this._send(ws, { event: "error", message: '"tableId" required' });
+          this._send(ws, { event: "error", message: "All tables are full and no overflow could be created" });
           break;
         }
 

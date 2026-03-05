@@ -96,7 +96,7 @@ export function LandingPage() {
       } catch { /* server not running in pure dev — use fallback */ }
     };
     void fetchStats();
-    const id = setInterval(fetchStats, 30_000);
+    const id = setInterval(fetchStats, 5_000);
     return () => clearInterval(id);
   }, []);
 

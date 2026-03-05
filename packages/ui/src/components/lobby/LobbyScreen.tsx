@@ -5,6 +5,7 @@ import {
   DEMO_TOURNAMENTS,
   DEMO_LEADERBOARD,
   type LobbyTable,
+  type LobbyTournament,
 } from "../../lib/demo-lobby.js";
 import { TournamentCard }   from "./TournamentCard.js";
 import { CashTableRow }     from "./CashTableRow.js";
@@ -68,18 +69,27 @@ function mapApiTable(t: ApiTable): LobbyTable {
 }
 
 export function LobbyScreen({ initialTables, onJoinTable, onWatchTable, onTableCreated }: Props) {
-  const [tables, setTables]         = useState<LobbyTable[]>(initialTables ?? DEMO_TABLES);
-  const [createModalOpen, setCreate] = useState(false);
+  const [tables,      setTables]      = useState<LobbyTable[]>(initialTables ?? DEMO_TABLES);
+  const [tournaments, setTournaments] = useState<LobbyTournament[]>(DEMO_TOURNAMENTS);
+  const [createModalOpen, setCreate]  = useState(false);
 
-  // Poll /api/tables every 5 s for live data
+  // Poll /api/tables and /api/tournaments every 5 s for live data
   useEffect(() => {
     let cancelled = false;
     async function poll() {
       try {
-        const res = await fetch("/api/tables");
-        if (!res.ok) return;
-        const data: ApiTable[] = await res.json() as ApiTable[];
-        if (!cancelled && data.length > 0) setTables(data.map(mapApiTable));
+        const [tablesRes, tournamentsRes] = await Promise.all([
+          fetch("/api/tables"),
+          fetch("/api/tournaments"),
+        ]);
+        if (tablesRes.ok) {
+          const data: ApiTable[] = await tablesRes.json() as ApiTable[];
+          if (!cancelled && data.length > 0) setTables(data.map(mapApiTable));
+        }
+        if (tournamentsRes.ok) {
+          const data: LobbyTournament[] = await tournamentsRes.json() as LobbyTournament[];
+          if (!cancelled) setTournaments(data.length > 0 ? data : DEMO_TOURNAMENTS);
+        }
       } catch { /* network error — keep previous data */ }
     }
     void poll();
@@ -94,7 +104,7 @@ export function LobbyScreen({ initialTables, onJoinTable, onWatchTable, onTableC
 
   // Quick stats
   const totalAgents       = tables.reduce((s, t) => s + t.currentPlayers, 0);
-  const activeTournaments = DEMO_TOURNAMENTS.filter((t) => t.status !== "complete").length;
+  const activeTournaments = tournaments.filter((t) => t.status !== "complete").length;
   const leaderboardCount  = DEMO_LEADERBOARD.length;
 
   return (
@@ -123,7 +133,7 @@ export function LobbyScreen({ initialTables, onJoinTable, onWatchTable, onTableC
             {/* Tournaments */}
             <Section icon="🏆" title="Tournaments">
               <div className="flex flex-col gap-2.5">
-                {DEMO_TOURNAMENTS.map((t) => (
+                {tournaments.map((t) => (
                   <TournamentCard
                     key={t.id}
                     tournament={t}

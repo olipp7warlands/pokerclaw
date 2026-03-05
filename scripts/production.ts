@@ -232,10 +232,11 @@ httpApp.get("/health", (_req: Request, res: Response): void => {
 
 httpApp.get("/api/stats", (_req: Request, res: Response): void => {
   const httpSessions = httpAgentBridge.sessionCount;
+  const wsAgents     = agentBridge.listOnlineAgents().length;
   res.json({
     totalHands,
     totalAgents:  seenAgentIds.size + httpSessions,
-    onlineAgents: uiBridge.clientCount + httpSessions,
+    onlineAgents: wsAgents + httpSessions,
     activeTables: activeBotTables.size,
     topELO:       [],
   });
@@ -298,6 +299,45 @@ httpApp.get("/api/tables", (_req: Request, res: Response): void => {
     };
   });
   res.json(tables);
+});
+
+// ---------------------------------------------------------------------------
+// Dynamic tournaments (generated from online agent count)
+// ---------------------------------------------------------------------------
+
+httpApp.get("/api/tournaments", (_req: Request, res: Response): void => {
+  const n = seenAgentIds.size + httpAgentBridge.sessionCount;
+  const tournaments: unknown[] = [];
+
+  if (n >= 16) {
+    tournaments.push({
+      id:             "sitgo-9",
+      name:           "Sit & Go — 9 Max",
+      currentPlayers: Math.min(n, 9),
+      maxPlayers:     9,
+      buyIn:          100,
+      prizePool:      900,
+      topPrize:       540,
+      status:         n >= 9 ? "running" : "registering",
+      startsInMs:     n >= 9 ? -1 : (9 - n) * 60_000,
+    });
+  }
+
+  if (n >= 32) {
+    tournaments.push({
+      id:             "sitgo-16",
+      name:           "Sit & Go — 16 Max",
+      currentPlayers: Math.min(n - 9, 16),
+      maxPlayers:     16,
+      buyIn:          200,
+      prizePool:      3_200,
+      topPrize:       1_920,
+      status:         n >= 25 ? "running" : "registering",
+      startsInMs:     n >= 25 ? -1 : 300_000,
+    });
+  }
+
+  res.json(tournaments);
 });
 
 // ---------------------------------------------------------------------------
@@ -473,6 +513,107 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 const HAND_DELAY_MS   = IS_PROD ? 2_000 : 0;
 const ACTION_DELAY_MS = IS_PROD ?   200 : 0;
 
+/** Attach orchestrator event handlers (decision / chat / hand_complete). */
+function setupOrchHandlers(orch: AgentOrchestrator, store: GameStore, tableId: string): void {
+  orch.on("decision", ({ agentId, decision }: { agentId: string; decision: { action: string; amount?: number } }) => {
+    const record = store.getTable(tableId);
+    if (record) {
+      uiBridge.broadcastFullSnapshot(tableId, record, {
+        agentId,
+        type:   decision.action,
+        amount: decision.amount ?? 0,
+      });
+    }
+    logDebug("Decision", { table: tableId, agentId, action: decision.action, amount: decision.amount });
+    recentActivity.unshift({
+      agentId,
+      action:  decision.action,
+      tableId,
+      ts:      new Date().toISOString(),
+      ...(decision.amount !== undefined && { amount: decision.amount }),
+    });
+    if (recentActivity.length > 50) recentActivity.pop();
+  });
+
+  orch.on("chat", ({ agentId, message }: { agentId: string; message: string }) => {
+    uiBridge.broadcastChat(tableId, agentId, message);
+    logDebug("Chat", { table: tableId, agentId, message: message.slice(0, 60) });
+  });
+
+  orch.on("hand_complete", (result: HandResult) => {
+    totalHands++;
+    const record = store.getTable(tableId);
+    if (record) uiBridge.broadcastFullSnapshot(tableId, record);
+    for (const id of seenAgentIds) {
+      const r = eloMap.get(id);
+      if (r) r.hands++;
+    }
+    for (const winner of result.winners) {
+      const r = eloMap.get(winner.agentId);
+      if (r) { r.wins++; r.elo = Math.min(2000, r.elo + Math.floor(winner.amountWon / 10)); }
+    }
+    if (!IS_PROD || totalHands % 10 === 0) {
+      const wins = result.winners.map((w) => `${w.agentId}+${w.amountWon}`).join(", ");
+      logInfo("Hand milestone", { table: tableId, totalHands, handNumber: result.handNumber, winners: wins });
+    }
+  });
+}
+
+/**
+ * Create an overflow table when a preset table is full.
+ * Synchronously registers with bridges so the joining agent is seated immediately.
+ * Returns the new tableId.
+ */
+function createOverflowTable(baseTableId: string): string | undefined {
+  // Find the base preset (or the base of an existing overflow like "beginners-2")
+  const baseConfig =
+    PRESET_TABLES.find((c) => c.id === baseTableId) ??
+    PRESET_TABLES.find((c) => baseTableId.startsWith(c.id));
+  if (!baseConfig) {
+    logWarn("createOverflowTable: unknown base table", { baseTableId });
+    return undefined;
+  }
+
+  // Pick the next available number
+  let n = 2;
+  while (activeBotTables.has(`${baseConfig.id}-${n}`)) n++;
+
+  const newId     = `${baseConfig.id}-${n}`;
+  const newConfig: PresetTable = { ...baseConfig, id: newId, name: `${baseConfig.name} ${n}`, bots: [] };
+
+  const store = new GameStore();
+  const orch  = new AgentOrchestrator(store, {
+    tableId:        newId,
+    smallBlind:     newConfig.smallBlind,
+    bigBlind:       newConfig.bigBlind,
+    startingTokens: newConfig.startingTokens,
+  });
+  // Patch maxPlayers — AgentOrchestrator creates the table with default maxPlayers=9
+  const tableRecord = store.getTable(newId);
+  if (tableRecord) tableRecord.config.maxPlayers = newConfig.maxPlayers;
+
+  activeBotTables.set(newId, { store, config: newConfig });
+  agentBridge.registerBotTable(store, newId, orch, newConfig.startingTokens);
+  httpAgentBridge.registerBotTable(store, newId, orch, newConfig.startingTokens);
+  setupOrchHandlers(orch, store, newId);
+
+  // Start the game loop (no bots — plays as soon as ≥2 external agents join)
+  void orch.playTournament(9_999, {
+    decisionTimeoutMs: 15_000,
+    handDelayMs:       HAND_DELAY_MS,
+    actionDelayMs:     ACTION_DELAY_MS,
+  })
+    .catch((err) => logError("Overflow table error", { table: newId, error: String(err) }))
+    .finally(() => {
+      agentBridge.unregisterBotTable(newId);
+      httpAgentBridge.unregisterBotTable(newId);
+      activeBotTables.delete(newId);
+    });
+
+  logInfo(`Auto-created overflow table "${newConfig.name}"`, { id: newId, base: baseConfig.id });
+  return newId;
+}
+
 async function runTableSession(cfg: PresetTable, sessionN: number): Promise<void> {
   logDebug(`Starting session ${sessionN}`, { table: cfg.id, bots: cfg.bots });
 
@@ -483,6 +624,9 @@ async function runTableSession(cfg: PresetTable, sessionN: number): Promise<void
     bigBlind:       cfg.bigBlind,
     startingTokens: cfg.startingTokens,
   });
+  // Patch maxPlayers — AgentOrchestrator creates the table with default maxPlayers=9
+  const tableRecord = store.getTable(cfg.id);
+  if (tableRecord) tableRecord.config.maxPlayers = cfg.maxPlayers;
 
   activeBotTables.set(cfg.id, { store, config: cfg });
 
@@ -497,59 +641,17 @@ async function runTableSession(cfg: PresetTable, sessionN: number): Promise<void
     return [new Cls({ id, tableId: cfg.id })];
   });
 
-  // Skip tables with no bots — wait for external agents to join instead.
-  if (agents.length === 0) {
-    logInfo(`Table "${cfg.name}" (${cfg.id}) ready — waiting for external agents`);
-    return;
+  for (const agent of agents) orch.registerAgent(agent);
+  if (agents.length > 0) {
+    logDebug("Agents registered", { table: cfg.id, agents: agents.map((a) => a.id ?? "?") });
+  } else {
+    logInfo(`Table "${cfg.name}" (${cfg.id}) ready — no bots, waiting for external agents`);
   }
 
-  for (const agent of agents) orch.registerAgent(agent);
-  logDebug("Agents registered", { table: cfg.id, agents: agents.map((a) => a.id ?? "?") });
-
-  orch.on("decision", ({ agentId, decision }: { agentId: string; decision: { action: string; amount?: number } }) => {
-    const record = store.getTable(cfg.id);
-    if (record) {
-      uiBridge.broadcastFullSnapshot(cfg.id, record, {
-        agentId,
-        type:   decision.action,
-        amount: decision.amount ?? 0,
-      });
-    }
-    logDebug("Decision", { table: cfg.id, agentId, action: decision.action, amount: decision.amount });
-    recentActivity.unshift({
-      agentId,
-      action:  decision.action,
-      tableId: cfg.id,
-      ts:      new Date().toISOString(),
-      ...(decision.amount !== undefined && { amount: decision.amount }),
-    });
-    if (recentActivity.length > 50) recentActivity.pop();
-  });
-
-  orch.on("chat", ({ agentId, message }: { agentId: string; message: string }) => {
-    uiBridge.broadcastChat(cfg.id, agentId, message);
-    logDebug("Chat", { table: cfg.id, agentId, message: message.slice(0, 60) });
-  });
-
-  orch.on("hand_complete", (result: HandResult) => {
-    totalHands++;
-    const record = store.getTable(cfg.id);
-    if (record) uiBridge.broadcastFullSnapshot(cfg.id, record);
-    for (const id of seenAgentIds) {
-      const r = eloMap.get(id);
-      if (r) r.hands++;
-    }
-    for (const winner of result.winners) {
-      const r = eloMap.get(winner.agentId);
-      if (r) { r.wins++; r.elo = Math.min(2000, r.elo + Math.floor(winner.amountWon / 10)); }
-    }
-    if (!IS_PROD || totalHands % 10 === 0) {
-      const wins = result.winners.map((w) => `${w.agentId}+${w.amountWon}`).join(", ");
-      logInfo("Hand milestone", { table: cfg.id, totalHands, handNumber: result.handNumber, winners: wins });
-    }
-  });
+  setupOrchHandlers(orch, store, cfg.id);
 
   try {
+    // Always run the game loop — even empty tables serve external agents
     await orch.playTournament(9_999, {
       decisionTimeoutMs: 15_000,
       handDelayMs:       HAND_DELAY_MS,
@@ -575,12 +677,15 @@ async function runTableLoop(cfg: PresetTable): Promise<void> {
   }
 }
 
+// Register overflow callback with both bridges
+agentBridge.setOnTableFull(createOverflowTable);
+httpAgentBridge.setOnTableFull(createOverflowTable);
+
 logInfo(`Bot game loops starting`, {
   tables:        PRESET_TABLES.map((t) => t.id),
   handDelayMs:   HAND_DELAY_MS,
   actionDelayMs: ACTION_DELAY_MS,
 });
 
-// Start all table loops concurrently (top-level await only applies to the first promise,
-// so we fire-and-forget the rest).
+// Start all table loops concurrently
 void Promise.all(PRESET_TABLES.map((cfg) => runTableLoop(cfg)));
