@@ -16,6 +16,14 @@
  *     → { ok: true, result: { event, ... } }
  *
  * Session TTL: 5 min without a poll → auto-expire.
+ *
+ * Orchestrator integration:
+ *  - Call setBotStore(store, tableId) so external agents are seated at the bot table.
+ *  - Call setOrchestrator(orch) at the start of each game session.
+ *  - When an agent does join_table, they are also added to the bot store and registered
+ *    with the orchestrator so they participate in the betting loop.
+ *  - When it is an external agent's turn, the orchestrator calls their decide() function,
+ *    which queues a your_turn event and waits (up to 30 s) for the agent to send an action.
  */
 
 import * as crypto from "node:crypto";
@@ -36,8 +44,31 @@ import { allIn }    from "./tools/all-in.js";
 // Constants
 // ---------------------------------------------------------------------------
 
-const POLL_TIMEOUT_MS = 25_000;    // max time to hold a long poll open
-const SESSION_TTL_MS  = 5 * 60_000; // 5 min no-poll → expire session
+const POLL_TIMEOUT_MS     = 25_000;    // max time to hold a long poll open
+const SESSION_TTL_MS      = 5 * 60_000; // 5 min no-poll → expire session
+const EXTERNAL_TIMEOUT_MS = 30_000;    // max wait for external agent action
+
+// ---------------------------------------------------------------------------
+// Orchestrator integration interface
+// Defined here (in mcp-server) to avoid circular dependency with @pokercrawl/agents.
+// ---------------------------------------------------------------------------
+
+/** A resolved action from an external HTTP agent, forwarded to the orchestrator. */
+export interface ExternalDecision {
+  action:     string;
+  amount?:    number;
+  confidence: number;
+  reasoning?: string;
+}
+
+/**
+ * Minimal interface for the game orchestrator.
+ * AgentOrchestrator satisfies this structurally — no import needed.
+ */
+export interface IExternalOrchestrator {
+  registerExternalAgent(agentId: string, decide: (ctx: unknown) => Promise<ExternalDecision>): void;
+  unregisterExternalAgent(agentId: string): void;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -45,14 +76,22 @@ const SESSION_TTL_MS  = 5 * 60_000; // 5 min no-poll → expire session
 
 type PollEvent = Record<string, unknown>;
 
+interface PendingDecision {
+  resolve: (d: ExternalDecision) => void;
+  reject:  (e: Error) => void;
+  timer:   ReturnType<typeof setTimeout>;
+}
+
 interface AgentSession {
-  sessionId: string;
-  agentId:   string;
-  agent:     WsAgentRecord;
-  queue:     PollEvent[];
-  lastPoll:  number;
-  resolve:   ((events: PollEvent[]) => void) | null;
-  pollTimer: ReturnType<typeof setTimeout> | null;
+  sessionId:       string;
+  agentId:         string;
+  agent:           WsAgentRecord;
+  queue:           PollEvent[];
+  lastPoll:        number;
+  resolve:         ((events: PollEvent[]) => void) | null;
+  pollTimer:       ReturnType<typeof setTimeout> | null;
+  /** Set while the orchestrator is waiting for this agent's action. */
+  pendingDecision: PendingDecision | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +107,14 @@ export class HttpAgentBridge {
   /** agentId   → sessionId  (for store-update fan-out) */
   private readonly _agentIdx = new Map<string, string>();
 
+  /** Bot-game store — external agents are cross-seated here so the orchestrator includes them. */
+  private _botStore:   GameStore | null = null;
+  private _botTableId  = "main";
+  private _botTokens   = 1_000;
+
+  /** Current game orchestrator — set at the start of each session. */
+  private _orchestrator: IExternalOrchestrator | null = null;
+
   constructor(
     store: GameStore,
     findAgentByToken: (token: string) => WsAgentRecord | undefined,
@@ -81,6 +128,38 @@ export class HttpAgentBridge {
 
     // GC expired sessions every minute
     setInterval(() => this._gc(), 60_000);
+  }
+
+  // -------------------------------------------------------------------------
+  // Orchestrator wiring (called from production.ts)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Provide the bot-game store so external agents are cross-seated when they join.
+   * Call once after construction; the bot store is stable across sessions.
+   */
+  setBotStore(store: GameStore, tableId = "main", initialTokens = 1_000): void {
+    this._botStore  = store;
+    this._botTableId = tableId;
+    this._botTokens  = initialTokens;
+  }
+
+  /**
+   * Set (or clear) the current orchestrator.
+   * Called at the start of each game session and with null when the session ends.
+   * On set: all currently-connected HTTP agents are re-registered and cross-seated.
+   */
+  setOrchestrator(orch: IExternalOrchestrator | null): void {
+    this._orchestrator = orch;
+
+    if (orch) {
+      // Re-register all active sessions with the new orchestrator so they
+      // participate in the new game session.
+      for (const session of this._sessions.values()) {
+        this._crossSeatAndRegister(session);
+      }
+    }
+    // If orch === null: pending decisions will time out (30 s fold).
   }
 
   // -------------------------------------------------------------------------
@@ -100,12 +179,13 @@ export class HttpAgentBridge {
     const sessionId = crypto.randomBytes(16).toString("hex");
     const session: AgentSession = {
       sessionId,
-      agentId:   agent.agentId,
+      agentId:         agent.agentId,
       agent,
-      queue:     [],
-      lastPoll:  Date.now(),
-      resolve:   null,
-      pollTimer: null,
+      queue:           [],
+      lastPoll:        Date.now(),
+      resolve:         null,
+      pollTimer:       null,
+      pendingDecision: null,
     };
     this._sessions.set(sessionId, session);
     this._agentIdx.set(agent.agentId, sessionId);
@@ -160,8 +240,8 @@ export class HttpAgentBridge {
     if (!session) return json(res, 404, { error: "Session not found or expired" });
 
     try {
-      const cmd = body as unknown as WsCommand;
-      const result = this._processCommand(session.agent, cmd);
+      const cmd  = body as unknown as WsCommand;
+      const result = this._processCommand(session, cmd);
       return json(res, 200, { ok: true, result });
     } catch (e) {
       return json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
@@ -172,23 +252,18 @@ export class HttpAgentBridge {
   get sessionCount(): number { return this._sessions.size; }
 
   // -------------------------------------------------------------------------
-  // Command dispatcher (mirrors WsAgentBridge._handleWsMessage)
+  // Command dispatcher
   // -------------------------------------------------------------------------
 
-  private _processCommand(agent: WsAgentRecord, cmd: WsCommand): PollEvent {
+  private _processCommand(session: AgentSession, cmd: WsCommand): PollEvent {
+    const agent = session.agent;
+
     switch (cmd.action) {
       case "list_tables": {
         const tables = this._store.listTableIds().flatMap((id) => {
           const rec = this._store.getTable(id);
           if (!rec) return [];
-          return [{
-            tableId:     id,
-            phase:       rec.state.phase,
-            playerCount: rec.state.seats.length,
-            maxPlayers:  rec.config.maxPlayers,
-            smallBlind:  rec.config.smallBlind,
-            bigBlind:    rec.config.bigBlind,
-          }];
+          return [{ tableId: id, phase: rec.state.phase, playerCount: rec.state.seats.length, maxPlayers: rec.config.maxPlayers, smallBlind: rec.config.smallBlind, bigBlind: rec.config.bigBlind }];
         });
         return { event: "tables_list", tables };
       }
@@ -201,33 +276,51 @@ export class HttpAgentBridge {
           capabilities:   agent.capabilities,
           initial_tokens: cmd.tokens ?? 1_000,
         }, this._store);
+
+        // Cross-seat into bot-game store + register with orchestrator
+        if (r.success && cmd.tableId === this._botTableId) {
+          this._crossSeatAndRegister(session);
+        }
+
         return { event: "action_result", ...r };
       }
 
       case "fold": {
         const e = this._needTable(cmd); if (e) return e;
+        if (session.pendingDecision) return this._resolveDecision(session, { action: "fold", confidence: 0.5 });
         return { event: "action_result", ...fold({ tableId: cmd.tableId!, agentId: agent.agentId }, this._store) };
       }
+
       case "call": {
         const e = this._needTable(cmd); if (e) return e;
+        if (session.pendingDecision) return this._resolveDecision(session, { action: "call", confidence: 0.5 });
         return { event: "action_result", ...call({ tableId: cmd.tableId!, agentId: agent.agentId }, this._store) };
       }
+
       case "check": {
         const e = this._needTable(cmd); if (e) return e;
+        if (session.pendingDecision) return this._resolveDecision(session, { action: "check", confidence: 0.5 });
         return { event: "action_result", ...check({ tableId: cmd.tableId!, agentId: agent.agentId }, this._store) };
       }
+
       case "all_in": {
         const e = this._needTable(cmd); if (e) return e;
+        if (session.pendingDecision) return this._resolveDecision(session, { action: "all-in", confidence: 0.5 });
         return { event: "action_result", ...allIn({ tableId: cmd.tableId!, agentId: agent.agentId }, this._store) };
       }
+
       case "bet": {
         if (!cmd.tableId || !cmd.amount) return { event: "error", message: '"tableId" and "amount" required' };
+        if (session.pendingDecision) return this._resolveDecision(session, { action: "bet", amount: cmd.amount, confidence: 0.5 });
         return { event: "action_result", ...bet({ tableId: cmd.tableId, agentId: agent.agentId, amount: cmd.amount }, this._store) };
       }
+
       case "raise": {
         if (!cmd.tableId || !cmd.amount) return { event: "error", message: '"tableId" and "amount" required' };
+        if (session.pendingDecision) return this._resolveDecision(session, { action: "raise", amount: cmd.amount, confidence: 0.5 });
         return { event: "action_result", ...raise({ tableId: cmd.tableId, agentId: agent.agentId, amount: cmd.amount }, this._store) };
       }
+
       case "table_talk": {
         if (!cmd.tableId || !cmd.message) return { event: "error", message: '"tableId" and "message" required' };
         try {
@@ -245,6 +338,75 @@ export class HttpAgentBridge {
 
   private _needTable(cmd: WsCommand): PollEvent | undefined {
     return cmd.tableId ? undefined : { event: "error", message: '"tableId" required' };
+  }
+
+  // -------------------------------------------------------------------------
+  // Orchestrator helpers
+  // -------------------------------------------------------------------------
+
+  /**
+   * Add the session's agent to the bot-game store and register them with the
+   * orchestrator so the betting loop waits for their HTTP actions.
+   */
+  private _crossSeatAndRegister(session: AgentSession): void {
+    // Cross-seat into bot store
+    if (this._botStore) {
+      try {
+        joinTable({
+          tableId:        this._botTableId,
+          agentId:        session.agentId,
+          capabilities:   session.agent.capabilities,
+          initial_tokens: this._botTokens,
+        }, this._botStore);
+      } catch {
+        // Already seated — fine, agent persists across sessions
+      }
+    }
+
+    // Register decide function with orchestrator
+    if (!this._orchestrator) return;
+
+    const self = this;
+    const agentId = session.agentId;
+
+    const decide = (_ctx: unknown): Promise<ExternalDecision> => {
+      return new Promise<ExternalDecision>((resolve, reject) => {
+        // Cancel any leftover pending decision from a previous hand
+        if (session.pendingDecision) {
+          clearTimeout(session.pendingDecision.timer);
+          session.pendingDecision.reject(new Error("superseded by new turn"));
+          session.pendingDecision = null;
+        }
+
+        // 30-second auto-fold timeout
+        const timer = setTimeout(() => {
+          if (session.pendingDecision) {
+            session.pendingDecision = null;
+            resolve({ action: "fold", confidence: 0, reasoning: "timeout 30s" });
+          }
+        }, EXTERNAL_TIMEOUT_MS);
+
+        session.pendingDecision = { resolve, reject, timer };
+
+        // Flush queued events (your_turn was already enqueued by _onStoreUpdate)
+        self._flushQueue(session);
+      });
+    };
+
+    this._orchestrator.registerExternalAgent(agentId, decide);
+  }
+
+  /**
+   * Resolve the orchestrator's pending decision with the action the agent just sent.
+   * Returns an action_result event instead of applying the action directly
+   * (the orchestrator will apply it via processAction).
+   */
+  private _resolveDecision(session: AgentSession, decision: ExternalDecision): PollEvent {
+    const pending = session.pendingDecision!;
+    clearTimeout(pending.timer);
+    session.pendingDecision = null;
+    pending.resolve(decision);
+    return { event: "action_result", success: true, message: "Action submitted to game" };
   }
 
   // -------------------------------------------------------------------------
@@ -287,14 +449,7 @@ export class HttpAgentBridge {
       for (const ev of events) session.queue.push(ev);
 
       // Flush to a waiting poll immediately
-      if (session.resolve && session.queue.length > 0) {
-        const all     = session.queue.splice(0);
-        const resolve = session.resolve;
-        clearTimeout(session.pollTimer!);
-        session.resolve   = null;
-        session.pollTimer = null;
-        resolve(all);
-      }
+      this._flushQueue(session);
     }
   }
 
@@ -311,6 +466,7 @@ export class HttpAgentBridge {
       handNumber:      state.handNumber,
       board:           state.board,
       mainPot:         state.mainPot,
+      pot:             state.mainPot,
       sidePots:        state.sidePots,
       currentBet:      state.currentBet,
       actionOnAgentId: state.seats[state.actionOnIndex]?.agentId ?? null,
@@ -334,6 +490,11 @@ export class HttpAgentBridge {
       if (seat.stack > callAmount) validActions.push("raise");
     }
     validActions.push("all_in");
+
+    // Min-raise = at least the size of the last raise, or 1 big blind
+    const lastRaise = (state as unknown as Record<string, unknown>)["lastRaiseAmount"] as number | undefined ?? record.config.bigBlind;
+    const minRaise  = callAmount + Math.max(lastRaise, record.config.bigBlind);
+
     return {
       event:        "your_turn",
       tableId,
@@ -341,14 +502,19 @@ export class HttpAgentBridge {
       handNumber:   state.handNumber,
       phase:        state.phase,
       board:        state.board,
+      // Canonical field names (agent-friendly)
+      holeCards:    [...seat.holeCards],
+      pot:          state.mainPot,
+      callAmount,
+      minRaise,
+      validActions,
+      // Legacy aliases kept for backward compat
       myHoleCards:  [...seat.holeCards],
       myStack:      seat.stack,
       myCurrentBet: seat.currentBet,
       mainPot:      state.mainPot,
       sidePots:     state.sidePots,
       currentBet:   state.currentBet,
-      callAmount,
-      validActions,
       seats: state.seats.map((s, i) => ({
         agentId:    s.agentId,
         stack:      s.stack,
@@ -360,14 +526,40 @@ export class HttpAgentBridge {
   }
 
   // -------------------------------------------------------------------------
+  // Poll helpers
+  // -------------------------------------------------------------------------
+
+  /** Flush queued events to a waiting long-poll response if one is pending. */
+  private _flushQueue(session: AgentSession): void {
+    if (session.resolve && session.queue.length > 0) {
+      const all     = session.queue.splice(0);
+      const resolve = session.resolve;
+      clearTimeout(session.pollTimer!);
+      session.resolve   = null;
+      session.pollTimer = null;
+      resolve(all);
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Session lifecycle
   // -------------------------------------------------------------------------
 
   private _closeSession(sessionId: string): void {
     const session = this._sessions.get(sessionId);
     if (!session) return;
-    if (session.pollTimer) clearTimeout(session.pollTimer);
-    if (session.resolve)   session.resolve([]); // unblock pending poll
+
+    if (session.pollTimer)       clearTimeout(session.pollTimer);
+    if (session.resolve)         session.resolve([]);
+    if (session.pendingDecision) {
+      clearTimeout(session.pendingDecision.timer);
+      session.pendingDecision.resolve({ action: "fold", confidence: 0, reasoning: "agent disconnected" });
+    }
+
+    if (this._orchestrator) {
+      this._orchestrator.unregisterExternalAgent(session.agentId);
+    }
+
     this._sessions.delete(sessionId);
     this._agentIdx.delete(session.agentId);
     console.log(
@@ -398,4 +590,3 @@ function json(res: ServerResponse, status: number, data: unknown): void {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(data));
 }
-

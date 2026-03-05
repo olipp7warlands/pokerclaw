@@ -38,7 +38,23 @@ import type {
 /** Phases where agents must take betting actions. */
 const BETTING_PHASES = new Set(["preflop", "flop", "turn", "river"]);
 
-const DEFAULT_TIMEOUT_MS = 15_000;
+const DEFAULT_TIMEOUT_MS     = 15_000;
+const EXTERNAL_TIMEOUT_MS    = 30_000;
+
+// ---------------------------------------------------------------------------
+// External agent decide function type
+// ---------------------------------------------------------------------------
+
+/**
+ * Decision from an external HTTP agent forwarded to the orchestrator.
+ * Uses unknown for ctx to avoid circular dep with @pokercrawl/mcp-server.
+ */
+type ExternalDecideFn = (ctx: unknown) => Promise<{
+  action:     string;
+  amount?:    number;
+  confidence: number;
+  reasoning?: string;
+}>;
 
 // ---------------------------------------------------------------------------
 // Typed event declarations (interface merging)
@@ -71,6 +87,8 @@ export declare interface AgentOrchestrator {
 export class AgentOrchestrator extends EventEmitter {
   private readonly agents = new Map<string, BaseAgent>();
   private readonly initialTokens = new Map<string, number>();
+  /** External HTTP agents: agentId → decide function provided by HttpAgentBridge. */
+  private readonly externalAgents = new Map<string, ExternalDecideFn>();
   private readonly store: GameStore;
   private readonly config: GameConfig;
   private started = false;
@@ -84,6 +102,21 @@ export class AgentOrchestrator extends EventEmitter {
   // -------------------------------------------------------------------------
   // Registration
   // -------------------------------------------------------------------------
+
+  /**
+   * Register an external HTTP agent's decide function.
+   * Called by HttpAgentBridge when the agent joins the bot table.
+   * The orchestrator will call decide() when it's this agent's turn,
+   * wait up to 30 s for an HTTP action, and apply the result.
+   */
+  registerExternalAgent(agentId: string, decide: ExternalDecideFn): void {
+    this.externalAgents.set(agentId, decide);
+  }
+
+  /** Remove external agent registration (e.g. on disconnect or session end). */
+  unregisterExternalAgent(agentId: string): void {
+    this.externalAgents.delete(agentId);
+  }
 
   /** Register an agent. Must be called before setup() / playHand(). */
   registerAgent(agent: BaseAgent, tokens?: number): void {
@@ -159,18 +192,23 @@ export class AgentOrchestrator extends EventEmitter {
       if (actorSeat.status === "folded" || actorSeat.status === "all-in") break;
 
       const agentId = actorSeat.agentId;
-      const agent = this.agents.get(agentId);
+      const agent   = this.agents.get(agentId);
+      const context = this._buildContext(agentId, record);
 
       let decision: AgentDecision;
-      if (!agent) {
-        decision = {
-          action: "fold",
-          reasoning: `No registered agent for seat "${agentId}"`,
-          confidence: 0,
-        };
-      } else {
-        const context = this._buildContext(agentId, record);
+      if (agent) {
         decision = await this._requestDecision(agent, context, timeoutMs);
+      } else {
+        const externalDecide = this.externalAgents.get(agentId);
+        if (externalDecide) {
+          decision = await this._requestExternalDecision(agentId, externalDecide, context);
+        } else {
+          decision = {
+            action:    "fold",
+            reasoning: `No registered agent for seat "${agentId}"`,
+            confidence: 0,
+          };
+        }
       }
 
       this.emit("decision", { agentId, decision });
@@ -266,6 +304,36 @@ export class AgentOrchestrator extends EventEmitter {
         );
       }
       return { action: "fold", reasoning: "auto-fold: timeout or error", confidence: 0 };
+    }
+  }
+
+  /**
+   * Delegate the turn to an external HTTP agent via HttpAgentBridge.
+   * The decide() function queues a your_turn event and waits for the agent's HTTP action.
+   * Auto-folds if no response within 30 s.
+   */
+  private async _requestExternalDecision(
+    agentId: string,
+    decide: ExternalDecideFn,
+    ctx: StrategyContext,
+  ): Promise<AgentDecision> {
+    try {
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`External agent timeout after ${EXTERNAL_TIMEOUT_MS}ms`)),
+          EXTERNAL_TIMEOUT_MS,
+        )
+      );
+      const raw = await Promise.race([decide(ctx), timeout]);
+      return {
+        action:     raw.action as AgentDecision["action"],
+        confidence: raw.confidence,
+        reasoning:  raw.reasoning ?? "external agent decision",
+        ...(raw.amount !== undefined ? { amount: raw.amount } : {}),
+      };
+    } catch {
+      this.emit("timeout", { agentId });
+      return { action: "fold", reasoning: "external agent timeout (30s)", confidence: 0 };
     }
   }
 

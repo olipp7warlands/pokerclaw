@@ -46,7 +46,7 @@ import { gatewayRouter } from "@pokercrawl/gateway";
 // ---------------------------------------------------------------------------
 
 const PORT         = Number(process.env["PORT"]      ?? 3000);
-const BOT_COUNT    = Number(process.env["BOT_COUNT"] ?? 4);
+const BOT_COUNT    = Number(process.env["BOT_COUNT"] ?? 8);
 const CORS_ORIGINS = (process.env["CORS_ORIGINS"] ?? "*").split(",").map((s) => s.trim());
 const VERSION      = "0.1.0";
 const IS_PROD      = process.env["NODE_ENV"] === "production";
@@ -232,10 +232,11 @@ httpApp.get("/health", (_req: Request, res: Response): void => {
 // ---------------------------------------------------------------------------
 
 httpApp.get("/api/stats", (_req: Request, res: Response): void => {
+  const httpSessions = httpAgentBridge.sessionCount;
   res.json({
     totalHands,
-    totalAgents:  seenAgentIds.size,
-    onlineAgents: uiBridge.clientCount,
+    totalAgents:  seenAgentIds.size + httpSessions,
+    onlineAgents: uiBridge.clientCount + httpSessions,
     activeTables: 1,
     topELO:       [],
   });
@@ -412,6 +413,13 @@ async function runSession(sessionN: number): Promise<void> {
     startingTokens: 500,
   });
 
+  // Wire external HTTP agents into this session's store + orchestrator.
+  // setBotStore tells httpAgentBridge where to cross-seat joining agents.
+  // setOrchestrator re-registers all currently-connected HTTP agents so they
+  // participate in the new game session automatically.
+  httpAgentBridge.setBotStore(store, TABLE_ID, 500);
+  httpAgentBridge.setOrchestrator(orch);
+
   const agents: BaseAgent[] = [];
   for (let i = 0; i < BOT_COUNT; i++) {
     const Cls = BOT_CLASSES[i % BOT_CLASSES.length]!;
@@ -481,6 +489,9 @@ async function runSession(sessionN: number): Promise<void> {
     logError("Session error", {
       error: err instanceof Error ? err.message : String(err),
     });
+  } finally {
+    // Detach orchestrator — external agents will be re-registered on next session.
+    httpAgentBridge.setOrchestrator(null);
   }
 }
 
