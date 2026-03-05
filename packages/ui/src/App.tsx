@@ -60,7 +60,7 @@ function LobbyView({ tables, onTableCreated }: { tables: LobbyTable[]; onTableCr
       <LobbyScreen
         initialTables={tables}
         onJoinTable={(tableId) => navigate(`/table/${tableId}`)}
-        onWatchTable={(tableId) => navigate(`/table/${tableId}`)}
+        onWatchTable={(tableId) => navigate(`/spectate/${tableId}`)}
         onTableCreated={onTableCreated}
       />
     </Layout>

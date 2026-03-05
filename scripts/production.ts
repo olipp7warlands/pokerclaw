@@ -46,7 +46,6 @@ import { gatewayRouter } from "@pokercrawl/gateway";
 // ---------------------------------------------------------------------------
 
 const PORT         = Number(process.env["PORT"]      ?? 3000);
-const BOT_COUNT    = Number(process.env["BOT_COUNT"] ?? 8);
 const CORS_ORIGINS = (process.env["CORS_ORIGINS"] ?? "*").split(",").map((s) => s.trim());
 const VERSION      = "0.1.0";
 const IS_PROD      = process.env["NODE_ENV"] === "production";
@@ -220,7 +219,7 @@ httpApp.get("/health", (_req: Request, res: Response): void => {
   res.json({
     status:    "ok",
     uptime:    Math.floor(process.uptime()),
-    tables:    1,
+    tables:    activeBotTables.size,
     agents:    seenAgentIds.size,
     version:   VERSION,
     wsClients: uiBridge.clientCount,
@@ -237,7 +236,7 @@ httpApp.get("/api/stats", (_req: Request, res: Response): void => {
     totalHands,
     totalAgents:  seenAgentIds.size + httpSessions,
     onlineAgents: uiBridge.clientCount + httpSessions,
-    activeTables: 1,
+    activeTables: activeBotTables.size,
     topELO:       [],
   });
 });
@@ -269,6 +268,36 @@ httpApp.get("/api/leaderboard", (_req: Request, res: Response): void => {
 
 httpApp.get("/api/activity", (_req: Request, res: Response): void => {
   res.json(recentActivity.slice(0, 20));
+});
+
+// ---------------------------------------------------------------------------
+// Live tables list (polled by LobbyScreen every 5 s)
+// ---------------------------------------------------------------------------
+
+httpApp.get("/api/tables", (_req: Request, res: Response): void => {
+  const tables = PRESET_TABLES.map((cfg) => {
+    const entry = activeBotTables.get(cfg.id);
+    const record = entry?.store.getTable(cfg.id);
+    const seats = record?.state.seats ?? [];
+    const activePot = record?.state.mainPot ?? 0;
+    const status = !record
+      ? "waiting"
+      : record.state.phase === "waiting"
+        ? "waiting"
+        : "active";
+    return {
+      id:          cfg.id,
+      name:        cfg.name,
+      smallBlind:  cfg.smallBlind,
+      bigBlind:    cfg.bigBlind,
+      maxPlayers:  cfg.maxPlayers,
+      players:     seats.length,
+      pot:         activePot,
+      status,
+      handNumber:  record?.state.handNumber ?? 0,
+    };
+  });
+  res.json(tables);
 });
 
 // ---------------------------------------------------------------------------
@@ -367,9 +396,9 @@ if (existsSync(UI_DIST)) {
 
 httpServer.listen(PORT, () => {
   logInfo(`PokerCrawl v${VERSION} started`, {
-    port: PORT,
-    env:  IS_PROD ? "production" : "development",
-    bots: BOT_COUNT,
+    port:   PORT,
+    env:    IS_PROD ? "production" : "development",
+    tables: PRESET_TABLES.length,
   });
   logDebug(`  → HTTP:        http://localhost:${PORT}`);
   logDebug(`  → WS (UI):     ws://localhost:${PORT}/ws-ui`);
@@ -378,23 +407,65 @@ httpServer.listen(PORT, () => {
 });
 
 // ---------------------------------------------------------------------------
-// Bot agents — continuous game loop
+// Multi-table bot configuration
 // ---------------------------------------------------------------------------
 
-const BOT_CLASSES = [
-  AggressiveBot,
-  ConservativeBot,
-  BlufferBot,
-  CalculatedBot,
-  RandomBot,
-  WolfBot,
-  OwlBot,
-  TurtleBot,
-  FoxBot,
-] as const;
+interface PresetTable {
+  id:             string;
+  name:           string;
+  smallBlind:     number;
+  bigBlind:       number;
+  maxPlayers:     number;
+  startingTokens: number;
+  bots:           string[];
+}
 
-const BOT_IDS  = ["shark", "rock", "mago", "caos", "reloj", "wolf", "owl", "turtle", "fox"];
-const TABLE_ID = "main";
+const PRESET_TABLES: PresetTable[] = [
+  {
+    id:             "beginners",
+    name:           "Beginners",
+    smallBlind:     5,
+    bigBlind:       10,
+    maxPlayers:     6,
+    startingTokens: 500,
+    bots:           ["wolf", "owl", "turtle", "fox"],
+  },
+  {
+    id:             "shark-tank",
+    name:           "Shark Tank",
+    smallBlind:     25,
+    bigBlind:       50,
+    maxPlayers:     9,
+    startingTokens: 1_000,
+    bots:           ["shark", "rock", "mago", "caos"],
+  },
+  {
+    id:             "high-rollers",
+    name:           "High Rollers",
+    smallBlind:     100,
+    bigBlind:       200,
+    maxPlayers:     4,
+    startingTokens: 5_000,
+    bots:           [],
+  },
+];
+
+type BotClass = new (opts: { id: string; tableId: string }) => BaseAgent;
+
+const BOT_CLASS_MAP: Record<string, BotClass> = {
+  shark:  AggressiveBot,
+  rock:   ConservativeBot,
+  mago:   BlufferBot,
+  caos:   CalculatedBot,
+  reloj:  RandomBot,
+  wolf:   WolfBot,
+  owl:    OwlBot,
+  turtle: TurtleBot,
+  fox:    FoxBot,
+};
+
+/** Active bot table entries — used by GET /api/tables and /api/stats. */
+const activeBotTables = new Map<string, { store: GameStore; config: PresetTable }>();
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -402,55 +473,53 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 const HAND_DELAY_MS   = IS_PROD ? 2_000 : 0;
 const ACTION_DELAY_MS = IS_PROD ?   200 : 0;
 
-async function runSession(sessionN: number): Promise<void> {
-  logDebug(`Starting session ${sessionN}`, { table: TABLE_ID, botCount: BOT_COUNT });
+async function runTableSession(cfg: PresetTable, sessionN: number): Promise<void> {
+  logDebug(`Starting session ${sessionN}`, { table: cfg.id, bots: cfg.bots });
 
   const store = new GameStore();
   const orch  = new AgentOrchestrator(store, {
-    tableId:        TABLE_ID,
-    smallBlind:     5,
-    bigBlind:       10,
-    startingTokens: 500,
+    tableId:        cfg.id,
+    smallBlind:     cfg.smallBlind,
+    bigBlind:       cfg.bigBlind,
+    startingTokens: cfg.startingTokens,
   });
 
-  // Wire external HTTP agents into this session's store + orchestrator.
-  // setBotStore tells httpAgentBridge where to cross-seat joining agents.
-  // setOrchestrator re-registers all currently-connected HTTP agents so they
-  // participate in the new game session automatically.
-  httpAgentBridge.setBotStore(store, TABLE_ID, 500);
-  httpAgentBridge.setOrchestrator(orch);
+  activeBotTables.set(cfg.id, { store, config: cfg });
 
-  // Wire external WS agents (OpenClaw / WebSocket clients) into the same store.
-  // join_table "main" will cross-seat them alongside the bots.
-  agentBridge.setBotStore(store, TABLE_ID, 500);
-  agentBridge.setOrchestrator(orch);
+  // Wire external agents into this table's store + orchestrator.
+  agentBridge.registerBotTable(store, cfg.id, orch, cfg.startingTokens);
+  httpAgentBridge.registerBotTable(store, cfg.id, orch, cfg.startingTokens);
 
-  const agents: BaseAgent[] = [];
-  for (let i = 0; i < BOT_COUNT; i++) {
-    const Cls = BOT_CLASSES[i % BOT_CLASSES.length]!;
-    const id  = BOT_IDS[i] ?? `bot-${i}`;
-    agents.push(new Cls({ id, tableId: TABLE_ID }));
+  const agents: BaseAgent[] = cfg.bots.flatMap((id) => {
+    const Cls = BOT_CLASS_MAP[id];
+    if (!Cls) return [];
     seenAgentIds.add(id);
+    return [new Cls({ id, tableId: cfg.id })];
+  });
+
+  // Skip tables with no bots — wait for external agents to join instead.
+  if (agents.length === 0) {
+    logInfo(`Table "${cfg.name}" (${cfg.id}) ready — waiting for external agents`);
+    return;
   }
 
   for (const agent of agents) orch.registerAgent(agent);
-  logDebug("Agents registered", { agents: agents.map((a) => a.id ?? "?") });
+  logDebug("Agents registered", { table: cfg.id, agents: agents.map((a) => a.id ?? "?") });
 
   orch.on("decision", ({ agentId, decision }: { agentId: string; decision: { action: string; amount?: number } }) => {
-    const record = store.getTable(TABLE_ID);
+    const record = store.getTable(cfg.id);
     if (record) {
-      uiBridge.broadcastFullSnapshot(TABLE_ID, record, {
+      uiBridge.broadcastFullSnapshot(cfg.id, record, {
         agentId,
         type:   decision.action,
         amount: decision.amount ?? 0,
       });
     }
-    // Individual bot decisions — debug only (very high frequency in production)
-    logDebug("Decision", { agentId, action: decision.action, amount: decision.amount });
+    logDebug("Decision", { table: cfg.id, agentId, action: decision.action, amount: decision.amount });
     recentActivity.unshift({
       agentId,
       action:  decision.action,
-      tableId: TABLE_ID,
+      tableId: cfg.id,
       ts:      new Date().toISOString(),
       ...(decision.amount !== undefined && { amount: decision.amount }),
     });
@@ -458,16 +527,14 @@ async function runSession(sessionN: number): Promise<void> {
   });
 
   orch.on("chat", ({ agentId, message }: { agentId: string; message: string }) => {
-    uiBridge.broadcastChat(TABLE_ID, agentId, message);
-    // Bot chat — debug only (can be dozens of messages per hand)
-    logDebug("Chat", { agentId, message: message.slice(0, 60) });
+    uiBridge.broadcastChat(cfg.id, agentId, message);
+    logDebug("Chat", { table: cfg.id, agentId, message: message.slice(0, 60) });
   });
 
   orch.on("hand_complete", (result: HandResult) => {
     totalHands++;
-    const record = store.getTable(TABLE_ID);
-    if (record) uiBridge.broadcastFullSnapshot(TABLE_ID, record);
-    // Update ELO
+    const record = store.getTable(cfg.id);
+    if (record) uiBridge.broadcastFullSnapshot(cfg.id, record);
     for (const id of seenAgentIds) {
       const r = eloMap.get(id);
       if (r) r.hands++;
@@ -476,11 +543,9 @@ async function runSession(sessionN: number): Promise<void> {
       const r = eloMap.get(winner.agentId);
       if (r) { r.wins++; r.elo = Math.min(2000, r.elo + Math.floor(winner.amountWon / 10)); }
     }
-    // In production: log a milestone summary every 10 hands instead of every hand.
-    // In development: log every hand.
     if (!IS_PROD || totalHands % 10 === 0) {
       const wins = result.winners.map((w) => `${w.agentId}+${w.amountWon}`).join(", ");
-      logInfo("Hand milestone", { totalHands, handNumber: result.handNumber, winners: wins });
+      logInfo("Hand milestone", { table: cfg.id, totalHands, handNumber: result.handNumber, winners: wins });
     }
   });
 
@@ -492,18 +557,30 @@ async function runSession(sessionN: number): Promise<void> {
     });
   } catch (err) {
     logError("Session error", {
+      table: cfg.id,
       error: err instanceof Error ? err.message : String(err),
     });
   } finally {
-    // Detach orchestrator — external agents will be re-registered on next session.
-    httpAgentBridge.setOrchestrator(null);
-    agentBridge.setOrchestrator(null);
+    agentBridge.unregisterBotTable(cfg.id);
+    httpAgentBridge.unregisterBotTable(cfg.id);
+    activeBotTables.delete(cfg.id);
   }
 }
 
-logInfo(`Bot game loop starting`, { botCount: BOT_COUNT, handDelayMs: HAND_DELAY_MS, actionDelayMs: ACTION_DELAY_MS });
-let sessionN = 1;
-for (;;) {
-  await runSession(sessionN++);
-  await sleep(IS_PROD ? 5_000 : 2_000); // longer pause between sessions in prod
+async function runTableLoop(cfg: PresetTable): Promise<void> {
+  let sessionN = 1;
+  for (;;) {
+    await runTableSession(cfg, sessionN++);
+    await sleep(IS_PROD ? 5_000 : 2_000);
+  }
 }
+
+logInfo(`Bot game loops starting`, {
+  tables:        PRESET_TABLES.map((t) => t.id),
+  handDelayMs:   HAND_DELAY_MS,
+  actionDelayMs: ACTION_DELAY_MS,
+});
+
+// Start all table loops concurrently (top-level await only applies to the first promise,
+// so we fire-and-forget the rest).
+void Promise.all(PRESET_TABLES.map((cfg) => runTableLoop(cfg)));

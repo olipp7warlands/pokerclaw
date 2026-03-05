@@ -120,11 +120,10 @@ export class WsAgentBridge {
   private _httpServer: http.Server | null = null;
   private _wss:        WebSocketServer | null = null;
 
-  // --- Bot-store / orchestrator integration (mirrors HttpAgentBridge) ---
-  private _botStore:     GameStore | null          = null;
-  private _botTableId                              = "main";
-  private _botTokens                               = 1_000;
-  private _orchestratorWs: _IOrchestratorForWs | null = null;
+  // --- Multi-table bot-store / orchestrator integration ---
+  private readonly _botTables = new Map<string, { store: GameStore; orch: _IOrchestratorForWs; tokens: number }>();
+  /** Optional callback invoked when all bot tables are full; returns a new tableId or undefined. */
+  private _onTableFullWs?: () => string | undefined;
   private readonly _pendingWsDecisions = new Map<string, _PendingWsDecision>();
 
   constructor(store: GameStore, port = 3002) {
@@ -282,38 +281,39 @@ export class WsAgentBridge {
   }
 
   // -------------------------------------------------------------------------
-  // Bot-store / orchestrator integration (mirrors HttpAgentBridge)
+  // Multi-table bot-store / orchestrator integration
   // -------------------------------------------------------------------------
 
   /**
-   * Provide the bot-game store so WS agents are cross-seated when they join.
-   * Call once after construction; stable across sessions.
+   * Register a bot table. Call once per table at the start of each session.
+   * Subscribes to store updates and re-registers any already-connected WS agents
+   * that are seated at this table.
    */
-  setBotStore(store: GameStore, tableId = "main", initialTokens = 1_000): void {
-    this._botStore   = store;
-    this._botTableId = tableId;
-    this._botTokens  = initialTokens;
+  registerBotTable(store: GameStore, tableId: string, orch: _IOrchestratorForWs, tokens = 1_000): void {
+    this._botTables.set(tableId, { store, orch, tokens });
     store.onUpdate((tId, record) => {
-      if (tId !== this._botTableId) return;
+      if (tId !== tableId || !this._botTables.get(tableId)) return;
       this._onBotStoreUpdate(tId, record);
     });
+    // Re-register any already-connected agents seated at this table
+    for (const [agentId, ws] of this._connections) {
+      if (store.getTable(tableId)?.agents.has(agentId)) {
+        this._crossSeatAndRegisterWs(agentId, tableId, { store, orch, tokens }, ws);
+      }
+    }
+  }
+
+  /** Remove a bot table registration (call when a session ends). */
+  unregisterBotTable(tableId: string): void {
+    this._botTables.delete(tableId);
   }
 
   /**
-   * Set (or clear) the current orchestrator.
-   * Called at the start of each game session (and with null when it ends).
-   * On set: re-registers all connected WS agents that are already cross-seated.
+   * Optional callback invoked when all bot tables are full and an agent needs
+   * auto-assignment. Should return the new tableId or undefined on failure.
    */
-  setOrchestrator(orch: _IOrchestratorForWs | null): void {
-    this._orchestratorWs = orch;
-    if (orch) {
-      for (const [agentId, ws] of this._connections) {
-        if (this._botStore?.getTable(this._botTableId)?.agents.has(agentId)) {
-          this._crossSeatAndRegisterWs(agentId, ws);
-        }
-      }
-    }
-    // If orch === null: pending decisions time out naturally (30 s → fold).
+  setOnTableFull(cb: () => string | undefined): void {
+    this._onTableFullWs = cb;
   }
 
   // -------------------------------------------------------------------------
@@ -449,20 +449,29 @@ export class WsAgentBridge {
 
       // ── Table join ─────────────────────────────────────────────────────
       case "join_table": {
-        if (!cmd.tableId) {
+        // Auto-assign: empty or "auto" tableId → table with most free seats
+        const targetTableId = (!cmd.tableId || cmd.tableId === "auto")
+          ? (this._findBestBotTable() ?? this._onTableFullWs?.())
+          : cmd.tableId;
+
+        if (!targetTableId) {
           this._send(ws, { event: "error", message: '"tableId" required' });
           break;
         }
+
         const result = joinTable({
-          tableId:        cmd.tableId,
+          tableId:        targetTableId,
           agentId:        agent.agentId,
           capabilities:   agent.capabilities,
           initial_tokens: cmd.tokens ?? 1_000,
         }, this._store);
 
-        // Cross-seat into bot store + register with orchestrator when joining the bot table
-        if (result.success && cmd.tableId === this._botTableId) {
-          this._crossSeatAndRegisterWs(agent.agentId, ws);
+        // Cross-seat into bot store + register with orchestrator when joining a bot table
+        if (result.success) {
+          const botEntry = this._botTables.get(targetTableId);
+          if (botEntry) {
+            this._crossSeatAndRegisterWs(agent.agentId, targetTableId, botEntry, ws);
+          }
         }
 
         this._send(ws, { event: "action_result", ...result });
@@ -560,25 +569,39 @@ export class WsAgentBridge {
   // Bot-store / orchestrator private helpers
   // -------------------------------------------------------------------------
 
+  /** Returns the tableId with the most free seats among registered bot tables. */
+  private _findBestBotTable(): string | undefined {
+    let bestId: string | undefined;
+    let bestSpace = 0;
+    for (const [tableId, { store }] of this._botTables) {
+      const record = store.getTable(tableId);
+      if (!record) continue;
+      const space = record.config.maxPlayers - record.state.seats.length;
+      if (space > bestSpace) { bestSpace = space; bestId = tableId; }
+    }
+    return bestId;
+  }
+
   /**
    * Cross-seat the agent in the bot store and register a decide() callback
    * with the orchestrator so the betting loop waits for their WS actions.
    */
-  private _crossSeatAndRegisterWs(agentId: string, _ws: WebSocket): void {
-    if (this._botStore) {
-      try {
-        joinTable({
-          tableId:        this._botTableId,
-          agentId,
-          capabilities:   this._agents.get(agentId)?.capabilities ?? [],
-          initial_tokens: this._botTokens,
-        }, this._botStore);
-      } catch {
-        // Already seated — fine, persists across sessions
-      }
+  private _crossSeatAndRegisterWs(
+    agentId:  string,
+    tableId:  string,
+    entry:    { store: GameStore; orch: _IOrchestratorForWs; tokens: number },
+    _ws:      WebSocket,
+  ): void {
+    try {
+      joinTable({
+        tableId,
+        agentId,
+        capabilities:   this._agents.get(agentId)?.capabilities ?? [],
+        initial_tokens: entry.tokens,
+      }, entry.store);
+    } catch {
+      // Already seated — fine, persists across sessions
     }
-
-    if (!this._orchestratorWs) return;
 
     const self     = this;
     const TIMEOUT  = 30_000;
@@ -604,7 +627,7 @@ export class WsAgentBridge {
         // The your_turn event is sent by _onBotStoreUpdate when the bot store notifies
       });
 
-    this._orchestratorWs.registerExternalAgent(agentId, decide);
+    entry.orch.registerExternalAgent(agentId, decide);
   }
 
   /**

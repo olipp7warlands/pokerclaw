@@ -18,10 +18,9 @@
  * Session TTL: 5 min without a poll → auto-expire.
  *
  * Orchestrator integration:
- *  - Call setBotStore(store, tableId) so external agents are seated at the bot table.
- *  - Call setOrchestrator(orch) at the start of each game session.
- *  - When an agent does join_table, they are also added to the bot store and registered
- *    with the orchestrator so they participate in the betting loop.
+ *  - Call registerBotTable(store, tableId, orch, tokens) for each bot table.
+ *  - When an agent does join_table, they are also added to the matching bot store and
+ *    registered with the corresponding orchestrator so they participate in the betting loop.
  *  - When it is an external agent's turn, the orchestrator calls their decide() function,
  *    which queues a your_turn event and waits (up to 30 s) for the agent to send an action.
  */
@@ -92,6 +91,8 @@ interface AgentSession {
   pollTimer:       ReturnType<typeof setTimeout> | null;
   /** Set while the orchestrator is waiting for this agent's action. */
   pendingDecision: PendingDecision | null;
+  /** Which bot table this session is cross-seated at (if any). */
+  botTableId?:     string;
 }
 
 // ---------------------------------------------------------------------------
@@ -107,13 +108,11 @@ export class HttpAgentBridge {
   /** agentId   → sessionId  (for store-update fan-out) */
   private readonly _agentIdx = new Map<string, string>();
 
-  /** Bot-game store — external agents are cross-seated here so the orchestrator includes them. */
-  private _botStore:   GameStore | null = null;
-  private _botTableId  = "main";
-  private _botTokens   = 1_000;
+  /** tableId → bot table entry (store + orchestrator + default tokens) */
+  private readonly _botTables = new Map<string, { store: GameStore; orch: IExternalOrchestrator; tokens: number }>();
 
-  /** Current game orchestrator — set at the start of each session. */
-  private _orchestrator: IExternalOrchestrator | null = null;
+  /** Called when a joining agent requests a table that is full; returns a new tableId or undefined. */
+  private _onTableFull?: () => string | undefined;
 
   constructor(
     store: GameStore,
@@ -135,31 +134,34 @@ export class HttpAgentBridge {
   // -------------------------------------------------------------------------
 
   /**
-   * Provide the bot-game store so external agents are cross-seated when they join.
-   * Call once after construction; the bot store is stable across sessions.
+   * Register a bot table. External agents that join this tableId will be
+   * cross-seated in `store` and registered with `orch`.
    */
-  setBotStore(store: GameStore, tableId = "main", initialTokens = 1_000): void {
-    this._botStore  = store;
-    this._botTableId = tableId;
-    this._botTokens  = initialTokens;
-  }
-
-  /**
-   * Set (or clear) the current orchestrator.
-   * Called at the start of each game session and with null when the session ends.
-   * On set: all currently-connected HTTP agents are re-registered and cross-seated.
-   */
-  setOrchestrator(orch: IExternalOrchestrator | null): void {
-    this._orchestrator = orch;
-
-    if (orch) {
-      // Re-register all active sessions with the new orchestrator so they
-      // participate in the new game session.
-      for (const session of this._sessions.values()) {
-        this._crossSeatAndRegister(session);
+  registerBotTable(store: GameStore, tableId: string, orch: IExternalOrchestrator, tokens = 1_000): void {
+    const entry = { store, orch, tokens };
+    this._botTables.set(tableId, entry);
+    // Subscribe to game-state updates from this bot store so HTTP agents receive
+    // your_turn events (and other state pushes) from the actual game loop.
+    store.onUpdate((tId, record) => {
+      if (tId !== tableId || !this._botTables.has(tableId)) return;
+      this._onStoreUpdate(tId, record);
+    });
+    // Re-register any active sessions already seated at this table.
+    for (const session of this._sessions.values()) {
+      if (session.botTableId === tableId) {
+        this._crossSeatAndRegister(session, tableId, entry);
       }
     }
-    // If orch === null: pending decisions will time out (30 s fold).
+  }
+
+  /** Remove a bot table (e.g. when the game session ends). */
+  unregisterBotTable(tableId: string): void {
+    this._botTables.delete(tableId);
+  }
+
+  /** Callback invoked when a joining agent's target table is full. Returns a new tableId or undefined. */
+  setOnTableFull(cb: () => string | undefined): void {
+    this._onTableFull = cb;
   }
 
   // -------------------------------------------------------------------------
@@ -269,17 +271,24 @@ export class HttpAgentBridge {
       }
 
       case "join_table": {
-        if (!cmd.tableId) return { event: "error", message: '"tableId" required' };
+        const targetTableId = (!cmd.tableId || cmd.tableId === "auto")
+          ? (this._findBestBotTable() ?? this._onTableFull?.())
+          : cmd.tableId;
+        if (!targetTableId) return { event: "error", message: '"tableId" required' };
+
         const r = joinTable({
-          tableId:        cmd.tableId,
+          tableId:        targetTableId,
           agentId:        agent.agentId,
           capabilities:   agent.capabilities,
           initial_tokens: cmd.tokens ?? 1_000,
         }, this._store);
 
         // Cross-seat into bot-game store + register with orchestrator
-        if (r.success && cmd.tableId === this._botTableId) {
-          this._crossSeatAndRegister(session);
+        if (r.success) {
+          const botEntry = this._botTables.get(targetTableId);
+          if (botEntry) {
+            this._crossSeatAndRegister(session, targetTableId, botEntry);
+          }
         }
 
         return { event: "action_result", ...r };
@@ -348,24 +357,26 @@ export class HttpAgentBridge {
    * Add the session's agent to the bot-game store and register them with the
    * orchestrator so the betting loop waits for their HTTP actions.
    */
-  private _crossSeatAndRegister(session: AgentSession): void {
+  private _crossSeatAndRegister(
+    session: AgentSession,
+    tableId: string,
+    entry: { store: GameStore; orch: IExternalOrchestrator; tokens: number },
+  ): void {
+    session.botTableId = tableId;
+
     // Cross-seat into bot store
-    if (this._botStore) {
-      try {
-        joinTable({
-          tableId:        this._botTableId,
-          agentId:        session.agentId,
-          capabilities:   session.agent.capabilities,
-          initial_tokens: this._botTokens,
-        }, this._botStore);
-      } catch {
-        // Already seated — fine, agent persists across sessions
-      }
+    try {
+      joinTable({
+        tableId,
+        agentId:        session.agentId,
+        capabilities:   session.agent.capabilities,
+        initial_tokens: entry.tokens,
+      }, entry.store);
+    } catch {
+      // Already seated — fine, agent persists across sessions
     }
 
     // Register decide function with orchestrator
-    if (!this._orchestrator) return;
-
     const self = this;
     const agentId = session.agentId;
 
@@ -393,7 +404,20 @@ export class HttpAgentBridge {
       });
     };
 
-    this._orchestrator.registerExternalAgent(agentId, decide);
+    entry.orch.registerExternalAgent(agentId, decide);
+  }
+
+  /** Find the registered bot table with the most available seat space. */
+  private _findBestBotTable(): string | undefined {
+    let bestId: string | undefined;
+    let bestSpace = 0;
+    for (const [tableId, { store }] of this._botTables) {
+      const record = store.getTable(tableId);
+      if (!record) continue;
+      const space = record.config.maxPlayers - record.state.seats.length;
+      if (space > bestSpace) { bestSpace = space; bestId = tableId; }
+    }
+    return bestId;
   }
 
   /**
@@ -556,8 +580,9 @@ export class HttpAgentBridge {
       session.pendingDecision.resolve({ action: "fold", confidence: 0, reasoning: "agent disconnected" });
     }
 
-    if (this._orchestrator) {
-      this._orchestrator.unregisterExternalAgent(session.agentId);
+    if (session.botTableId) {
+      const entry = this._botTables.get(session.botTableId);
+      if (entry) entry.orch.unregisterExternalAgent(session.agentId);
     }
 
     this._sessions.delete(sessionId);

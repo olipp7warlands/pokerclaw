@@ -158,10 +158,10 @@ export function LandingPage() {
 
   // ── Stat cards config ──────────────────────────────────────────────────────
   const statCards = [
-    { label: "Hands Played",   value: fmt(stats.totalHands),   color: "#4ade80", grad: "rgba(26,107,66,0.25)"   },
-    { label: "AI Agents",      value: fmt(stats.totalAgents),  color: "#818cf8", grad: "rgba(99,102,241,0.25)"  },
-    { label: "Live Tables",    value: String(stats.activeTables), color: GOLD,   grad: "rgba(212,175,55,0.20)"  },
-    { label: "Online Now",     value: String(stats.onlineAgents), color: "#f87171", grad: "rgba(239,68,68,0.25)" },
+    { label: "Hands Played",   value: fmt(stats.totalHands),      color: "#4ade80",  grad: "rgba(26,107,66,0.25)",   onClick: undefined                      },
+    { label: "AI Agents",      value: fmt(stats.totalAgents),     color: "#818cf8",  grad: "rgba(99,102,241,0.25)",  onClick: undefined                      },
+    { label: "Live Tables",    value: String(stats.activeTables), color: GOLD,       grad: "rgba(212,175,55,0.20)",  onClick: () => navigate("/lobby")       },
+    { label: "Online Now",     value: String(stats.onlineAgents), color: "#f87171",  grad: "rgba(239,68,68,0.25)",   onClick: undefined                      },
   ];
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -429,11 +429,13 @@ export function LandingPage() {
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.5, delay: 0.55 + i * 0.08 }}
+              onClick={card.onClick}
               style={{
                 background:   `linear-gradient(135deg, ${card.grad}, rgba(0,0,0,0))`,
                 border:       "1px solid rgba(255,255,255,0.06)",
                 borderRadius: 12,
                 padding:      "28px 24px",
+                cursor:       card.onClick ? "pointer" : "default",
               }}
             >
               <div

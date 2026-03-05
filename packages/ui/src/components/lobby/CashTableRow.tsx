@@ -72,7 +72,26 @@ export function CashTableRow({ table, index, onJoin, onWatch }: Props) {
 
       {/* Action */}
       <td className="py-2 px-3 text-right">
-        {isFull ? (
+        <span className="flex items-center justify-end gap-1.5">
+          {!isFull && (
+            <motion.button
+              whileHover={{
+                scale:      1.05,
+                background: "rgba(212,175,55,0.25)",
+                boxShadow:  "0 0 12px rgba(212,175,55,0.3)",
+              }}
+              whileTap={{ scale: 0.94 }}
+              onClick={() => onJoin?.(table.id)}
+              className="px-2.5 py-0.5 text-[10px] font-mono font-bold rounded transition-colors duration-150"
+              style={{
+                background: "rgba(212,175,55,0.12)",
+                border:     "1.5px solid rgba(212,175,55,0.5)",
+                color:      "#d4af37",
+              }}
+            >
+              JOIN
+            </motion.button>
+          )}
           <motion.button
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
@@ -85,25 +104,7 @@ export function CashTableRow({ table, index, onJoin, onWatch }: Props) {
           >
             WATCH
           </motion.button>
-        ) : (
-          <motion.button
-            whileHover={{
-              scale:      1.05,
-              background: "rgba(212,175,55,0.25)",
-              boxShadow:  "0 0 12px rgba(212,175,55,0.3)",
-            }}
-            whileTap={{ scale: 0.94 }}
-            onClick={() => onJoin?.(table.id)}
-            className="px-2.5 py-0.5 text-[10px] font-mono font-bold rounded transition-colors duration-150"
-            style={{
-              background: "rgba(212,175,55,0.12)",
-              border:     "1.5px solid rgba(212,175,55,0.5)",
-              color:      "#d4af37",
-            }}
-          >
-            JOIN
-          </motion.button>
-        )}
+        </span>
       </td>
     </motion.tr>
   );

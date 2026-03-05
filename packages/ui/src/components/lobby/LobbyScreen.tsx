@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import {
   DEMO_TABLES,
@@ -49,9 +49,43 @@ function Section({
 // LobbyScreen
 // ---------------------------------------------------------------------------
 
+interface ApiTable {
+  id: string; name: string; smallBlind: number; bigBlind: number;
+  maxPlayers: number; players: number; pot: number; status: string;
+}
+
+function mapApiTable(t: ApiTable): LobbyTable {
+  return {
+    id:             t.id,
+    name:           t.name,
+    blinds:         { small: t.smallBlind, big: t.bigBlind },
+    currentPlayers: t.players,
+    maxSeats:       t.maxPlayers,
+    avgPot:         t.pot,
+    type:           "cash",
+    status:         t.status === "active" ? "playing" : "waiting",
+  };
+}
+
 export function LobbyScreen({ initialTables, onJoinTable, onWatchTable, onTableCreated }: Props) {
   const [tables, setTables]         = useState<LobbyTable[]>(initialTables ?? DEMO_TABLES);
   const [createModalOpen, setCreate] = useState(false);
+
+  // Poll /api/tables every 5 s for live data
+  useEffect(() => {
+    let cancelled = false;
+    async function poll() {
+      try {
+        const res = await fetch("/api/tables");
+        if (!res.ok) return;
+        const data: ApiTable[] = await res.json() as ApiTable[];
+        if (!cancelled && data.length > 0) setTables(data.map(mapApiTable));
+      } catch { /* network error — keep previous data */ }
+    }
+    void poll();
+    const id = setInterval(() => { void poll(); }, 5_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
 
   function handleCreate(table: LobbyTable) {
     setTables((prev) => [...prev, table]);
