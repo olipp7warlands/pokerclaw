@@ -100,6 +100,36 @@ function TableView({ tables }: { tables: LobbyTable[] }) {
       })
       .catch(() => {});
   }, [connect]);
+
+  // Poll /api/tables/:id/state every 2s as HTTP fallback (catches initial state
+  // before the first WS broadcast arrives, and shows real agent names).
+  const [, setRestSnapshot] = useState<import("./hooks/useGameSocket.js").LiveSnapshot | null>(null);
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const r = await fetch(`/api/tables/${id}/state`);
+        if (!r.ok || cancelled) return;
+        const data = await r.json() as Record<string, unknown> & {
+          agentNames?: Record<string, string>;
+          seats?: Array<{ agentId: string; name: string }>;
+        };
+        // Register agent names from the state endpoint
+        if (data.agentNames) {
+          for (const [agentId, name] of Object.entries(data.agentNames)) {
+            if (!lookupAgent(agentId)) {
+              registerAgent({ id: agentId, name: name as string, nickname: name as string, emoji: "🤖", type: "bot", color: "#d4af37", style: "Server" });
+            }
+          }
+        }
+        if (!cancelled) setRestSnapshot(data as unknown as import("./hooks/useGameSocket.js").LiveSnapshot);
+      } catch { /* ignore — server might not have this table */ }
+    };
+    void poll();
+    const interval = setInterval(() => { void poll(); }, 2_000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [id]);
   const { gameState, recentActions, demoChat, handHistory, controlRef } = useGameState(
     liveSnapshot,
     mode === "connected",

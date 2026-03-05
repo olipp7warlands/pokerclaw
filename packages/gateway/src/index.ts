@@ -13,3 +13,16 @@ export { app } from "./server.js";
 
 // Embeddable router — mount at any prefix, e.g. app.use("/gateway", gatewayRouter)
 export { gatewayRouter } from "./server.js";
+
+// Supabase persistence layer (no-op when env vars not set)
+export {
+  isDbAvailable,
+  saveAgent,
+  updateAgentStats,
+  saveHandResult,
+  getLeaderboard,
+  getGlobalStats,
+  incrementGlobalHands,
+  incrementGlobalAgents,
+  saveBotTable,
+} from "./db.js";

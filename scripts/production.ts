@@ -39,7 +39,18 @@ import {
   TurtleBot,
   FoxBot,
 } from "@pokercrawl/agents";
-import { gatewayRouter } from "@pokercrawl/gateway";
+import {
+  gatewayRouter,
+  isDbAvailable,
+  saveAgent,
+  updateAgentStats,
+  saveHandResult,
+  getLeaderboard,
+  getGlobalStats,
+  incrementGlobalHands,
+  incrementGlobalAgents,
+  saveBotTable,
+} from "@pokercrawl/gateway";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -233,12 +244,16 @@ httpApp.get("/health", (_req: Request, res: Response): void => {
 httpApp.get("/api/stats", (_req: Request, res: Response): void => {
   const httpSessions = httpAgentBridge.sessionCount;
   const wsAgents     = agentBridge.listOnlineAgents().length;
-  res.json({
-    totalHands,
-    totalAgents:  seenAgentIds.size + httpSessions,
-    onlineAgents: wsAgents + httpSessions,
-    activeTables: activeBotTables.size,
-    topELO:       [],
+
+  // Try Supabase first (persistent across restarts), fall back to in-memory
+  void getGlobalStats().then((dbStats) => {
+    res.json({
+      totalHands:   dbStats ? Number(dbStats.total_hands)  : totalHands,
+      totalAgents:  dbStats ? Number(dbStats.total_agents) : seenAgentIds.size + httpSessions,
+      onlineAgents: wsAgents + httpSessions,
+      activeTables: activeBotTables.size,
+      topELO:       [],
+    });
   });
 });
 
@@ -247,20 +262,37 @@ httpApp.get("/api/stats", (_req: Request, res: Response): void => {
 // ---------------------------------------------------------------------------
 
 httpApp.get("/api/leaderboard", (_req: Request, res: Response): void => {
-  const entries = Array.from(eloMap.entries())
-    .map(([agentId, r]) => ({
-      rank:    0,
-      agentId,
-      name:    r.name,
-      emoji:   r.emoji,
-      elo:     r.elo,
-      wins:    r.wins,
-      hands:   r.hands,
-      winRate: r.hands > 0 ? Math.round((r.wins / r.hands) * 100) : 0,
-    }))
-    .sort((a, b) => b.elo - a.elo)
-    .map((e, i) => ({ ...e, rank: i + 1 }));
-  res.json(entries);
+  void getLeaderboard(20).then((dbRows) => {
+    if (dbRows && dbRows.length > 0) {
+      return res.json(
+        dbRows.map((r, i) => ({
+          rank:    i + 1,
+          agentId: r.id,
+          name:    r.name,
+          emoji:   r.avatar ?? "🤖",
+          elo:     r.elo,
+          wins:    r.hands_won,
+          hands:   r.hands_played,
+          winRate: r.hands_played > 0 ? Math.round((r.hands_won / r.hands_played) * 100) : 0,
+        })),
+      );
+    }
+    // Fallback to in-memory ELO map
+    const entries = Array.from(eloMap.entries())
+      .map(([agentId, r]) => ({
+        rank:    0,
+        agentId,
+        name:    r.name,
+        emoji:   r.emoji,
+        elo:     r.elo,
+        wins:    r.wins,
+        hands:   r.hands,
+        winRate: r.hands > 0 ? Math.round((r.wins / r.hands) * 100) : 0,
+      }))
+      .sort((a, b) => b.elo - a.elo)
+      .map((e, i) => ({ ...e, rank: i + 1 }));
+    return res.json(entries);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -448,11 +480,18 @@ httpApp.post("/api/agents/register", (req: Request, res: Response): void => {
     res.status(400).json({ error: '"name" is required' });
     return;
   }
+  const agentType = typeof cfg["type"] === "string" ? cfg["type"] : "custom";
   const result = agentBridge.registerAgent({
     name:         cfg["name"],
-    type:         typeof cfg["type"]  === "string"   ? cfg["type"]  : "custom",
+    type:         agentType,
     capabilities: Array.isArray(cfg["capabilities"]) ? (cfg["capabilities"] as string[]) : [],
   });
+  // Persist to Supabase and update global agent count
+  const capabilities = Array.isArray(cfg["capabilities"]) ? (cfg["capabilities"] as string[]) : [];
+  void saveAgent(result.agentId, cfg["name"], undefined, capabilities, agentType);
+  void incrementGlobalAgents();
+  seenAgentIds.add(result.agentId);
+
   const host  = req.headers["host"] ?? `localhost:${PORT}`;
   const proto = req.headers["x-forwarded-proto"] === "https" ? "wss" : "ws";
   res.status(201).json({
@@ -642,7 +681,10 @@ function setupOrchHandlers(orch: AgentOrchestrator, store: GameStore, tableId: s
     totalHands++;
     const record = store.getTable(tableId);
     if (record) uiBridge.broadcastFullSnapshot(tableId, record);
-    for (const id of seenAgentIds) {
+
+    // Update in-memory ELO
+    const seatedAgentIds = record?.state.seats.map((s) => s.agentId) ?? [];
+    for (const id of seatedAgentIds) {
       const r = eloMap.get(id);
       if (r) r.hands++;
     }
@@ -650,6 +692,25 @@ function setupOrchHandlers(orch: AgentOrchestrator, store: GameStore, tableId: s
       const r = eloMap.get(winner.agentId);
       if (r) { r.wins++; r.elo = Math.min(2000, r.elo + Math.floor(winner.amountWon / 10)); }
     }
+
+    // Persist to Supabase (fire-and-forget)
+    void incrementGlobalHands();
+    const playerSnapshot = record?.state.seats.map((s) => ({
+      agentId: s.agentId, stack: s.stack, status: s.status,
+    })) ?? [];
+    void saveHandResult(
+      tableId,
+      result.handNumber,
+      result.winners.map((w) => w.agentId),
+      result.winners.reduce((s, w) => s + w.amountWon, 0),
+      playerSnapshot,
+    );
+    // Update agent stats for each seated agent
+    for (const agentId of seatedAgentIds) {
+      const r = eloMap.get(agentId);
+      if (r) void updateAgentStats(agentId, r.hands, r.wins, r.elo);
+    }
+
     if (!IS_PROD || totalHands % 10 === 0) {
       const wins = result.winners.map((w) => `${w.agentId}+${w.amountWon}`).join(", ");
       logInfo("Hand milestone", { table: tableId, totalHands, handNumber: result.handNumber, winners: wins });
@@ -778,6 +839,17 @@ async function runTableLoop(cfg: PresetTable): Promise<void> {
 // Register overflow callback with both bridges
 agentBridge.setOnTableFull(createOverflowTable);
 httpAgentBridge.setOnTableFull(createOverflowTable);
+
+// Persist preset tables and bot agents to Supabase on startup
+if (isDbAvailable()) {
+  for (const cfg of PRESET_TABLES) {
+    void saveBotTable(cfg.id, cfg.name, cfg.smallBlind, cfg.bigBlind, cfg.maxPlayers);
+  }
+  for (const [botId, r] of eloMap) {
+    void saveAgent(botId, r.name, r.emoji, [], "simulated");
+  }
+  logInfo("DB: persisted preset tables and bot agents to Supabase");
+}
 
 logInfo(`Bot game loops starting`, {
   tables:        PRESET_TABLES.map((t) => t.id),

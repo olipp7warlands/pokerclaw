@@ -8,23 +8,23 @@
     "packages/*"
   ],
   "scripts": {
-    "dev":              "tsx scripts/start.ts",
-    "play":             "tsx scripts/start.ts --agents=4 --hands=10",
-    "play:fast":        "tsx scripts/start.ts --agents=4 --hands=20 --speed=5",
-    "play:ai":          "tsx scripts/start.ts --claude --openai --hands=5",
-    "train":            "tsx scripts/train.ts --bots=6 --hands=5000",
-    "train:fast":       "tsx scripts/train.ts --bots=6 --hands=50000 --silent",
+    "dev": "tsx scripts/start.ts",
+    "play": "tsx scripts/start.ts --agents=4 --hands=10",
+    "play:fast": "tsx scripts/start.ts --agents=4 --hands=20 --speed=5",
+    "play:ai": "tsx scripts/start.ts --claude --openai --hands=5",
+    "train": "tsx scripts/train.ts --bots=6 --hands=5000",
+    "train:fast": "tsx scripts/train.ts --bots=6 --hands=50000 --silent",
     "train:tournament": "tsx scripts/train.ts --bots=8 --hands=20000 --tournament",
-    "tournament":       "tsx scripts/start.ts --tournament --bots=8",
-    "lobby":            "tsx scripts/start.ts --lobby",
-    "gateway":          "tsx packages/gateway/src/server.ts",
-    "elo":              "tsx scripts/elo.ts",
-    "build":            "npm run build -w packages/engine && npm run build -w packages/mcp-server && npm run build -w packages/gateway && npm run build -w packages/agents && npm run build -w packages/training && npm run build -w packages/ui",
-    "test":             "npm run test --workspaces",
-    "start":            "node --import tsx/esm scripts/production.ts",
-    "start:dev":        "tsx scripts/production.ts",
-    "docker:build":     "docker build -t pokercrawl .",
-    "docker:run":       "docker-compose up"
+    "tournament": "tsx scripts/start.ts --tournament --bots=8",
+    "lobby": "tsx scripts/start.ts --lobby",
+    "gateway": "tsx packages/gateway/src/server.ts",
+    "elo": "tsx scripts/elo.ts",
+    "build": "npm run build -w packages/engine && npm run build -w packages/mcp-server && npm run build -w packages/gateway && npm run build -w packages/agents && npm run build -w packages/training && npm run build -w packages/ui",
+    "test": "npm run test --workspaces",
+    "start": "node --import tsx/esm scripts/production.ts",
+    "start:dev": "tsx scripts/production.ts",
+    "docker:build": "docker build -t pokercrawl .",
+    "docker:run": "docker-compose up"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",
@@ -32,5 +32,8 @@
   },
   "engines": {
     "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.98.0"
   }
 }
