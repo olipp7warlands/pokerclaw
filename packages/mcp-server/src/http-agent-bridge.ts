@@ -87,48 +87,40 @@ export class HttpAgentBridge {
   // HTTP handlers (called from production.ts routes)
   // -------------------------------------------------------------------------
 
-  /** POST /api/agents/connect */
-  handleConnect(req: IncomingMessage, res: ServerResponse): void {
-    readBody(req)
-      .then((raw) => {
-        let body: Record<string, unknown>;
-        try { body = JSON.parse(raw) as Record<string, unknown>; }
-        catch { return json(res, 400, { error: "Invalid JSON" }); }
+  /** POST /api/agents/connect — body is pre-parsed by Express json() middleware */
+  handleConnect(body: Record<string, unknown>, res: ServerResponse): void {
+    const token = typeof body["token"] === "string" ? body["token"] : "";
+    const agent = this._getAgent(token);
+    if (!agent) return json(res, 401, { error: "Invalid token" });
 
-        const token = typeof body["token"] === "string" ? body["token"] : "";
-        const agent = this._getAgent(token);
-        if (!agent) return json(res, 401, { error: "Invalid token" });
+    // Close any previous session for this agent
+    const prev = this._agentIdx.get(agent.agentId);
+    if (prev) this._closeSession(prev);
 
-        // Close any previous session for this agent
-        const prev = this._agentIdx.get(agent.agentId);
-        if (prev) this._closeSession(prev);
+    const sessionId = crypto.randomBytes(16).toString("hex");
+    const session: AgentSession = {
+      sessionId,
+      agentId:   agent.agentId,
+      agent,
+      queue:     [],
+      lastPoll:  Date.now(),
+      resolve:   null,
+      pollTimer: null,
+    };
+    this._sessions.set(sessionId, session);
+    this._agentIdx.set(agent.agentId, sessionId);
 
-        const sessionId = crypto.randomBytes(16).toString("hex");
-        const session: AgentSession = {
-          sessionId,
-          agentId:   agent.agentId,
-          agent,
-          queue:     [],
-          lastPoll:  Date.now(),
-          resolve:   null,
-          pollTimer: null,
-        };
-        this._sessions.set(sessionId, session);
-        this._agentIdx.set(agent.agentId, sessionId);
+    console.log(
+      `[${new Date().toISOString()}] INFO  [HttpAgentBridge] Agent connected:` +
+      ` ${agent.agentId} (${agent.name}) session=${sessionId}`,
+    );
 
-        console.log(
-          `[${new Date().toISOString()}] INFO  [HttpAgentBridge] Agent connected:` +
-          ` ${agent.agentId} (${agent.name}) session=${sessionId}`,
-        );
-
-        return json(res, 200, {
-          sessionId,
-          pollUrl: `/api/agents/poll/${sessionId}`,
-          sendUrl: `/api/agents/action/${sessionId}`,
-          agentId: agent.agentId,
-        });
-      })
-      .catch(() => json(res, 500, { error: "Internal error" }));
+    return json(res, 200, {
+      sessionId,
+      pollUrl: `/api/agents/poll/${sessionId}`,
+      sendUrl: `/api/agents/action/${sessionId}`,
+      agentId: agent.agentId,
+    });
   }
 
   /** GET /api/agents/poll/:sessionId — long poll */
@@ -162,25 +154,18 @@ export class HttpAgentBridge {
     }, POLL_TIMEOUT_MS);
   }
 
-  /** POST /api/agents/action/:sessionId */
-  handleAction(sessionId: string, req: IncomingMessage, res: ServerResponse): void {
+  /** POST /api/agents/action/:sessionId — body is pre-parsed by Express json() middleware */
+  handleAction(sessionId: string, body: Record<string, unknown>, res: ServerResponse): void {
     const session = this._sessions.get(sessionId);
     if (!session) return json(res, 404, { error: "Session not found or expired" });
 
-    readBody(req)
-      .then((raw) => {
-        let cmd: WsCommand;
-        try { cmd = JSON.parse(raw) as WsCommand; }
-        catch { return json(res, 400, { error: "Invalid JSON" }); }
-
-        try {
-          const result = this._processCommand(session.agent, cmd);
-          return json(res, 200, { ok: true, result });
-        } catch (e) {
-          return json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
-        }
-      })
-      .catch(() => json(res, 500, { error: "Internal error" }));
+    try {
+      const cmd = body as unknown as WsCommand;
+      const result = this._processCommand(session.agent, cmd);
+      return json(res, 200, { ok: true, result });
+    } catch (e) {
+      return json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+    }
   }
 
   /** Number of currently active HTTP sessions. */
@@ -414,11 +399,3 @@ function json(res: ServerResponse, status: number, data: unknown): void {
   res.end(JSON.stringify(data));
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    req.on("data",  (c: Buffer) => chunks.push(c));
-    req.on("end",   () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
-  });
-}

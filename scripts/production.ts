@@ -307,7 +307,8 @@ httpApp.get("/api/agents/online", (_req: Request, res: Response): void => {
 // ---------------------------------------------------------------------------
 
 httpApp.post("/api/agents/connect", (req: Request, res: Response): void => {
-  httpAgentBridge.handleConnect(req, res);
+  // Body already parsed by express.json() — pass directly to avoid double-read
+  httpAgentBridge.handleConnect(req.body as Record<string, unknown>, res);
 });
 
 httpApp.get("/api/agents/poll/:sessionId", (req: Request, res: Response): void => {
@@ -317,7 +318,7 @@ httpApp.get("/api/agents/poll/:sessionId", (req: Request, res: Response): void =
 });
 
 httpApp.post("/api/agents/action/:sessionId", (req: Request, res: Response): void => {
-  httpAgentBridge.handleAction(req.params["sessionId"]!, req, res);
+  httpAgentBridge.handleAction(req.params["sessionId"]!, req.body as Record<string, unknown>, res);
 });
 
 // ---------------------------------------------------------------------------
