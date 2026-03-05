@@ -67,7 +67,8 @@ function defaultWsUrl(): string {
   return `${proto}//${window.location.host}/ws-ui`;
 }
 
-export function useGameSocket(serverUrl = defaultWsUrl()) {
+export function useGameSocket(serverUrl?: string, tableId?: string) {
+  const _url = serverUrl ?? defaultWsUrl();
   const [mode, setMode] = useState<ConnectionMode>("demo");
   const [liveSnapshot, setLiveSnapshot] = useState<LiveSnapshot | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -77,7 +78,7 @@ export function useGameSocket(serverUrl = defaultWsUrl()) {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     setMode("connecting");
-    const ws = new WebSocket(serverUrl);
+    const ws = new WebSocket(_url);
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -103,6 +104,8 @@ export function useGameSocket(serverUrl = defaultWsUrl()) {
           event.type === "phase_change" ||
           event.type === "showdown"
         ) {
+          // Filter by tableId when provided — prevents cross-table bleed
+          if (tableId && event.tableId && event.tableId !== tableId) return;
           setLiveSnapshot(event.data as LiveSnapshot);
         }
       } catch {

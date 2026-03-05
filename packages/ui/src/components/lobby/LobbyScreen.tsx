@@ -55,6 +55,12 @@ interface ApiTable {
   maxPlayers: number; players: number; pot: number; status: string;
 }
 
+interface PrizePool {
+  total: number;
+  byProvider: Record<string, number>;
+  valueUSD: number;
+}
+
 function mapApiTable(t: ApiTable): LobbyTable {
   return {
     id:             t.id,
@@ -71,29 +77,38 @@ function mapApiTable(t: ApiTable): LobbyTable {
 export function LobbyScreen({ initialTables, onJoinTable, onWatchTable, onTableCreated }: Props) {
   const [tables,      setTables]      = useState<LobbyTable[]>(initialTables ?? DEMO_TABLES);
   const [tournaments, setTournaments] = useState<LobbyTournament[]>(DEMO_TOURNAMENTS);
+  const [prizePool,   setPrizePool]   = useState<PrizePool | null>(null);
   const [createModalOpen, setCreate]  = useState(false);
 
-  // Poll /api/tables and /api/tournaments every 5 s for live data
+  // Poll /api/tables, /api/tournaments and /api/prizepool every 3 s for live data
   useEffect(() => {
     let cancelled = false;
     async function poll() {
       try {
-        const [tablesRes, tournamentsRes] = await Promise.all([
+        const [tablesRes, tournamentsRes, ppRes] = await Promise.all([
           fetch("/api/tables"),
           fetch("/api/tournaments"),
+          fetch("/api/prizepool"),
         ]);
-        if (tablesRes.ok) {
-          const data: ApiTable[] = await tablesRes.json() as ApiTable[];
-          if (!cancelled && data.length > 0) setTables(data.map(mapApiTable));
-        }
-        if (tournamentsRes.ok) {
-          const data: LobbyTournament[] = await tournamentsRes.json() as LobbyTournament[];
-          if (!cancelled) setTournaments(data.length > 0 ? data : DEMO_TOURNAMENTS);
+        if (!cancelled) {
+          if (tablesRes.ok) {
+            const data: ApiTable[] = await tablesRes.json() as ApiTable[];
+            // Always update from server when server responds (even with fewer tables than demo)
+            setTables(data.map(mapApiTable));
+          }
+          if (tournamentsRes.ok) {
+            const data: LobbyTournament[] = await tournamentsRes.json() as LobbyTournament[];
+            setTournaments(data.length > 0 ? data : DEMO_TOURNAMENTS);
+          }
+          if (ppRes.ok) {
+            const data = await ppRes.json() as PrizePool;
+            setPrizePool(data);
+          }
         }
       } catch { /* network error — keep previous data */ }
     }
     void poll();
-    const id = setInterval(() => { void poll(); }, 5_000);
+    const id = setInterval(() => { void poll(); }, 3_000);
     return () => { cancelled = true; clearInterval(id); };
   }, []);
 
@@ -142,6 +157,11 @@ export function LobbyScreen({ initialTables, onJoinTable, onWatchTable, onTableC
                 ))}
               </div>
             </Section>
+
+            {/* Prize Pool */}
+            {prizePool && prizePool.total > 0 && (
+              <PrizePoolBar pool={prizePool} />
+            )}
 
             {/* Cash Tables */}
             <Section
@@ -214,6 +234,81 @@ export function LobbyScreen({ initialTables, onJoinTable, onWatchTable, onTableC
         onCreate={handleCreate}
       />
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PrizePoolBar
+// ---------------------------------------------------------------------------
+
+const PROVIDER_LABELS: Record<string, string> = {
+  anthropic: "Claude",
+  openai:    "GPT",
+  google:    "Gemini",
+  simulated: "Simulated",
+};
+const PROVIDER_COLORS: Record<string, string> = {
+  anthropic: "#d4af37",
+  openai:    "#60a5fa",
+  google:    "#4ade80",
+  simulated: "#94a3b8",
+};
+
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1_000)     return (n / 1_000).toFixed(1) + "K";
+  return String(Math.round(n));
+}
+
+function PrizePoolBar({ pool }: { pool: PrizePool }) {
+  const providers = Object.entries(pool.byProvider).filter(([, v]) => v > 0);
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -4 }}
+      animate={{ opacity: 1, y: 0 }}
+      style={{
+        background:   "linear-gradient(135deg, rgba(212,175,55,0.08), rgba(0,0,0,0))",
+        border:       "1px solid rgba(212,175,55,0.2)",
+        borderRadius: 10,
+        padding:      "12px 16px",
+        display:      "flex",
+        alignItems:   "center",
+        gap:          16,
+      }}
+    >
+      <div style={{ display: "flex", flexDirection: "column", minWidth: 90 }}>
+        <span className="text-[10px] font-mono text-white/35 uppercase tracking-widest">Prize Pool</span>
+        <span className="text-lg font-bold font-mono" style={{ color: "#d4af37", lineHeight: 1.2 }}>
+          {fmtTokens(pool.total)}
+        </span>
+        <span className="text-[10px] font-mono text-white/30">≈ ${pool.valueUSD.toFixed(2)} USD</span>
+      </div>
+
+      <div className="flex-1 flex items-center gap-1 flex-wrap">
+        {providers.length > 0 ? (
+          providers.map(([key, val]) => (
+            <span
+              key={key}
+              className="px-2 py-0.5 text-[10px] font-mono rounded-full"
+              style={{
+                background: `${PROVIDER_COLORS[key] ?? "#94a3b8"}18`,
+                border:     `1px solid ${PROVIDER_COLORS[key] ?? "#94a3b8"}40`,
+                color:      PROVIDER_COLORS[key] ?? "#94a3b8",
+              }}
+            >
+              {fmtTokens(val)} {PROVIDER_LABELS[key] ?? key}
+            </span>
+          ))
+        ) : (
+          <span className="text-[10px] font-mono text-white/25">No active games</span>
+        )}
+      </div>
+
+      <div
+        className="w-2 h-2 rounded-full flex-shrink-0 animate-pulse"
+        style={{ background: "#d4af37", boxShadow: "0 0 6px rgba(212,175,55,0.7)" }}
+      />
+    </motion.div>
   );
 }
 

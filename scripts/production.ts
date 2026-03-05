@@ -302,6 +302,104 @@ httpApp.get("/api/tables", (_req: Request, res: Response): void => {
 });
 
 // ---------------------------------------------------------------------------
+// Full table state (REST fallback for TableView — same shape as LiveSnapshot)
+// ---------------------------------------------------------------------------
+
+httpApp.get("/api/tables/:id/state", (req: Request, res: Response): void => {
+  const tableId = req.params["id"]!;
+  const entry   = activeBotTables.get(tableId);
+  if (!entry) { res.status(404).json({ error: "Table not found" }); return; }
+
+  const record = entry.store.getTable(tableId);
+  if (!record)  { res.status(404).json({ error: "Table not found" }); return; }
+
+  const { state } = record;
+
+  // Build agentId → display-name map so the UI can show real names
+  const agentNames: Record<string, string> = {};
+  for (const agentId of record.agents.keys()) agentNames[agentId] = agentId;
+  for (const a of agentBridge.listAgents()) agentNames[a.agentId] = a.name;
+
+  const mapCard = (c: { rank: string; suit: string; value: number }) =>
+    ({ rank: c.rank, suit: c.suit, value: c.value });
+
+  res.json({
+    tableId,
+    phase:           state.phase,
+    handNumber:      state.handNumber,
+    mainPot:         state.mainPot,
+    sidePots:        state.sidePots.map((sp) => ({ amount: sp.amount, eligibleAgents: [...sp.eligibleAgents] })),
+    currentBet:      state.currentBet,
+    lastRaiseAmount: state.lastRaiseAmount,
+    dealerIndex:     state.dealerIndex,
+    actionOnIndex:   state.actionOnIndex,
+    seats:           state.seats.map((s) => ({
+      agentId:           s.agentId,
+      name:              agentNames[s.agentId] ?? s.agentId,
+      stack:             s.stack,
+      currentBet:        s.currentBet,
+      totalBet:          s.totalBet,
+      status:            s.status,
+      hasActedThisRound: s.hasActedThisRound,
+    })),
+    board: {
+      flop:  state.board.flop.map(mapCard),
+      turn:  state.board.turn  ? mapCard(state.board.turn)  : null,
+      river: state.board.river ? mapCard(state.board.river) : null,
+    },
+    winners:    state.winners.map((w) => ({ agentId: w.agentId, amountWon: w.amountWon })),
+    agentNames,
+    config: {
+      smallBlind: record.config.smallBlind,
+      bigBlind:   record.config.bigBlind,
+      maxPlayers: record.config.maxPlayers,
+      name:       entry.config.name,
+    },
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Prize pool (total tokens in play across all active tables)
+// ---------------------------------------------------------------------------
+
+httpApp.get("/api/prizepool", (_req: Request, res: Response): void => {
+  let total = 0;
+  const registeredAgents = agentBridge.listAgents();
+  const byProvider: Record<string, number> = { anthropic: 0, openai: 0, google: 0, simulated: 0 };
+
+  for (const [tableId, { store }] of activeBotTables) {
+    const record = store.getTable(tableId);
+    if (!record) continue;
+
+    const tableTokens =
+      record.state.seats.reduce((s, seat) => s + seat.stack, 0) +
+      record.state.mainPot +
+      record.state.sidePots.reduce((s, sp) => s + sp.amount, 0);
+    total += tableTokens;
+
+    if (record.state.seats.length > 0) {
+      const tokensPerSeat = tableTokens / record.state.seats.length;
+      for (const seat of record.state.seats) {
+        const a = registeredAgents.find((r) => r.agentId === seat.agentId);
+        const provider = !a
+          ? "simulated"
+          : a.type === "claude"  ? "anthropic"
+          : a.type === "openai"  ? "openai"
+          : a.type === "gemini"  ? "google"
+          : "simulated";
+        byProvider[provider] = (byProvider[provider] ?? 0) + tokensPerSeat;
+      }
+    }
+  }
+
+  res.json({
+    total:     Math.round(total),
+    byProvider: Object.fromEntries(Object.entries(byProvider).map(([k, v]) => [k, Math.round(v)])),
+    valueUSD:  +(total * 0.00001).toFixed(4),
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Dynamic tournaments (generated from online agent count)
 // ---------------------------------------------------------------------------
 

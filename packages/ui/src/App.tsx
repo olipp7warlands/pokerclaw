@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { Routes, Route, Navigate, useNavigate, useParams } from "react-router-dom";
 
 import { useAnimations } from "./hooks/useAnimations.js";
@@ -19,7 +19,7 @@ import { HandHistory }    from "./components/dashboard/HandHistory.js";
 import { TokenBankPanel } from "./components/dashboard/TokenBankPanel.js";
 import { DEMO_TABLES }    from "./lib/demo-lobby.js";
 import type { LobbyTable } from "./lib/demo-lobby.js";
-import { registerAgent }  from "./lib/agent-registry.js";
+import { registerAgent, lookupAgent } from "./lib/agent-registry.js";
 import type { AgentConfig } from "./components/lobby/AddAgentModal.js";
 
 import { LandingPage }     from "./components/landing/LandingPage.js";
@@ -83,7 +83,23 @@ function TableView({ tables }: { tables: LobbyTable[] }) {
   const maxSeats    = tableConfig?.maxSeats      ?? 9;
 
   const { speed, setSpeed, isPlaying, setIsPlaying } = useAnimations();
-  const { mode, liveSnapshot, chatMessages, toggleMode } = useGameSocket();
+  const { mode, liveSnapshot, chatMessages, toggleMode, connect } = useGameSocket(undefined, id);
+
+  // Auto-connect to live server and populate agent name registry
+  useEffect(() => {
+    connect();
+    // Fetch registered external agents and add them to the local display registry
+    fetch("/api/agents")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((agents: Array<{ agentId: string; name: string; type: string }>) => {
+        for (const a of agents) {
+          if (!lookupAgent(a.agentId)) {
+            registerAgent({ id: a.agentId, name: a.name, nickname: a.name, emoji: "🤖", type: "bot", color: "#d4af37", style: "External" });
+          }
+        }
+      })
+      .catch(() => {});
+  }, [connect]);
   const { gameState, recentActions, demoChat, handHistory, controlRef } = useGameState(
     liveSnapshot,
     mode === "connected",
