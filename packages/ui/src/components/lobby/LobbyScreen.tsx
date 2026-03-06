@@ -20,6 +20,7 @@ interface Props {
 interface ApiCashTable {
   id: string; name: string; smallBlind: number; bigBlind: number;
   maxPlayers: number; players: number; pot: number; status: string;
+  waiting?: number;
   seats?: Array<{ agentId: string; name: string }>;
 }
 
@@ -267,12 +268,20 @@ function CashRow({ table, index, onJoin, onWatch }: {
       </td>
       <td className="py-2.5 px-3 text-xs font-mono text-white/35">{cashType(table.maxPlayers)}</td>
       <td className="py-2.5 px-3 text-xs font-mono">
-        <span style={{ color: playerColor, fontWeight: 600 }}>{table.players}</span>
-        <span className="text-white/22">/{table.maxPlayers}</span>
+        <div className="flex items-center gap-1.5">
+          <span style={{ color: playerColor, fontWeight: 600 }}>{table.players}</span>
+          <span className="text-white/22">/{table.maxPlayers}</span>
+          {(table.waiting ?? 0) > 0 && (
+            <span className="text-[9px] font-mono px-1 rounded"
+              style={{ color: "#fbbf24", background: "rgba(251,191,36,0.1)" }}>
+              +{table.waiting} waiting
+            </span>
+          )}
+        </div>
         {table.seats && table.seats.length > 0 && (
-          <div className="flex flex-wrap gap-0.5 mt-0.5">
+          <div className="flex flex-wrap gap-x-1.5 mt-0.5">
             {table.seats.map((s) => (
-              <span key={s.agentId} className="text-[9px] font-mono text-white/35 truncate max-w-[60px]" title={s.name}>
+              <span key={s.agentId} className="text-[9px] font-mono text-white/30 truncate max-w-[64px]" title={s.name}>
                 {s.name}
               </span>
             ))}

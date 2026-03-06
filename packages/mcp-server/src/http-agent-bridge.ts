@@ -113,6 +113,8 @@ export class HttpAgentBridge {
 
   /** Called when a joining agent's target table is full; receives base tableId, returns overflow tableId. */
   private _onTableFull?: (baseTableId: string) => string | undefined;
+  /** Called when an agent cannot be seated at any table (all full). */
+  private _onWaitlisted?: (agentId: string) => void;
 
   constructor(
     store: GameStore,
@@ -164,12 +166,34 @@ export class HttpAgentBridge {
     this._onTableFull = cb;
   }
 
+  /** Callback invoked when an agent connects but all tables are full (goes to waiting list). */
+  setOnWaitlisted(cb: (agentId: string) => void): void {
+    this._onWaitlisted = cb;
+  }
+
+  /**
+   * Seat a waiting agent at the given table. Called by production.ts when dequeuing from waiting list.
+   * Returns true if the agent was successfully seated.
+   */
+  seatSession(agentId: string, tableId: string): boolean {
+    const sid = this._agentIdx.get(agentId);
+    if (!sid) return false;
+    const session = this._sessions.get(sid);
+    if (!session) return false;
+    const entry = this._botTables.get(tableId);
+    if (!entry) return false;
+    this._crossSeatAndRegister(session, tableId, entry);
+    return session.botTableId === tableId;
+  }
+
   // -------------------------------------------------------------------------
   // HTTP handlers (called from production.ts routes)
   // -------------------------------------------------------------------------
 
-  /** POST /api/agents/connect — body is pre-parsed by Express json() middleware */
-  handleConnect(body: Record<string, unknown>, res: ServerResponse): void {
+  /** POST /api/agents/connect — body is pre-parsed by Express json() middleware.
+   *  `extra` is merged into the JSON response (e.g. availableTables from production.ts).
+   */
+  handleConnect(body: Record<string, unknown>, res: ServerResponse, extra: Record<string, unknown> = {}): void {
     const token = typeof body["token"] === "string" ? body["token"] : "";
     const agent = this._getAgent(token);
     if (!agent) return json(res, 401, { error: "Invalid token" });
@@ -193,21 +217,19 @@ export class HttpAgentBridge {
     this._agentIdx.set(agent.agentId, sessionId);
 
     // Auto-join: seat agent at the best available bot table on connect.
-    // This eliminates the need for agents to explicitly send join_table.
-    let autoTableId = this._findBestBotTable();
-    if (!autoTableId && this._onTableFull) {
-      // All tables full — create an overflow table from the first registered table
-      const firstTableId = [...this._botTables.keys()][0];
-      if (firstTableId) autoTableId = this._onTableFull(firstTableId);
-    }
+    // If all tables are full, call _onWaitlisted so production.ts can queue the agent.
+    const autoTableId = this._findBestBotTable();
     if (autoTableId) {
       const entry = this._botTables.get(autoTableId);
       if (entry) this._crossSeatAndRegister(session, autoTableId, entry);
+    } else {
+      // No table has space — add to waiting list (handled by production.ts)
+      this._onWaitlisted?.(agent.agentId);
     }
 
     console.log(
       `[${new Date().toISOString()}] INFO  [HttpAgentBridge] Agent connected:` +
-      ` ${agent.agentId} (${agent.name}) session=${sessionId} table=${session.botTableId ?? "none"}`,
+      ` ${agent.agentId} (${agent.name}) session=${sessionId} table=${session.botTableId ?? "waitlisted"}`,
     );
 
     return json(res, 200, {
@@ -216,6 +238,7 @@ export class HttpAgentBridge {
       sendUrl: `/api/agents/action/${sessionId}`,
       agentId: agent.agentId,
       tableId: session.botTableId ?? null,
+      ...extra,
     });
   }
 
@@ -397,19 +420,27 @@ export class HttpAgentBridge {
     tableId: string,
     entry: { store: GameStore; orch: IExternalOrchestrator; tokens: number },
   ): void {
-    session.botTableId = tableId;
+    const record        = entry.store.getTable(tableId);
+    const alreadySeated = record?.agents.has(session.agentId) ?? false;
 
-    // Cross-seat into bot store
-    try {
-      joinTable({
+    if (!alreadySeated) {
+      // Attempt to seat — joinTable catches all errors and returns success:false if table is full
+      const r = joinTable({
         tableId,
         agentId:        session.agentId,
         capabilities:   session.agent.capabilities,
         initial_tokens: entry.tokens,
       }, entry.store);
-    } catch {
-      // Already seated — fine, agent persists across sessions
+
+      if (!r.success) {
+        // Table is full or seating failed — add agent to waiting list
+        this._onWaitlisted?.(session.agentId);
+        return; // do NOT register with orchestrator without a seat
+      }
     }
+
+    // Successfully seated (or already was) — mark session and register decide function
+    session.botTableId = tableId;
 
     // Register decide function with orchestrator
     const self = this;
@@ -449,7 +480,8 @@ export class HttpAgentBridge {
     for (const [tableId, { store }] of this._botTables) {
       const record = store.getTable(tableId);
       if (!record) continue;
-      const space = record.config.maxPlayers - record.state.seats.length;
+      // Use agents.size (active agents) not seats.length (includes removed zero-stack seats)
+      const space = record.config.maxPlayers - record.agents.size;
       if (space > bestSpace) { bestSpace = space; bestId = tableId; }
     }
     return bestId;
@@ -617,7 +649,11 @@ export class HttpAgentBridge {
 
     if (session.botTableId) {
       const entry = this._botTables.get(session.botTableId);
-      if (entry) entry.orch.unregisterExternalAgent(session.agentId);
+      if (entry) {
+        entry.orch.unregisterExternalAgent(session.agentId);
+        // Free the seat so waiting agents can take it
+        try { entry.store.removeAgent(session.botTableId, session.agentId); } catch { /* already removed */ }
+      }
     }
 
     this._sessions.delete(sessionId);

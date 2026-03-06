@@ -127,6 +127,16 @@ function corsMiddleware(req: Request, res: Response, next: NextFunction): void {
 let totalHands = 0;
 const seenAgentIds = new Set<string>();
 
+interface AgentPrefs {
+  preferredStakes: string;  // "micro" | "low" | "mid" | "high"
+  gameType:        string;  // "cash" | "sng" | "mtt"
+  avatar?:         string;
+}
+const agentPrefs = new Map<string, AgentPrefs>();
+
+/** Global waiting list for cash tables — agentIds ordered by arrival time. */
+const cashWaitingList: string[] = [];
+
 interface BotRecord {
   name:  string;
   emoji: string;
@@ -349,6 +359,10 @@ httpApp.get("/api/tables", (_req: Request, res: Response): void => {
         ? "waiting"
         : "active";
     const seats = rawSeats.map((s) => ({ agentId: s.agentId, name: nameOf(s.agentId) }));
+    // Count how many waiting agents would prefer this table (estimate by stakes match)
+    const waitingForThisStake = cashWaitingList.length > 0
+      ? Math.ceil(cashWaitingList.length / Math.max(activeBotTables.size, 1))
+      : 0;
     return {
       id:         tableId,
       name:       config.name,
@@ -361,6 +375,7 @@ httpApp.get("/api/tables", (_req: Request, res: Response): void => {
       handNumber: record?.state.handNumber ?? 0,
       type:       "cash",
       seats,
+      waiting:    status !== "waiting" ? 0 : waitingForThisStake,
     };
   });
   tables.sort((a, b) => a.name.localeCompare(b.name));
@@ -509,11 +524,45 @@ httpApp.get("/api/tournaments", (_req: Request, res: Response): void => {
 // ---------------------------------------------------------------------------
 
 httpApp.get("/api/sng", (_req: Request, res: Response): void => {
-  res.json(SNG_LIST.map((s) => ({
-    ...s,
-    registered: sngRegistered.get(s.id) ?? 0,
-    status:     (sngRegistered.get(s.id) ?? 0) >= s.maxPlayers ? "running" : "registering",
-  })));
+  res.json(SNG_LIST.map((s) => {
+    const registered = sngRegistrants.get(s.id)?.length ?? 0;
+    const running    = sngRunning.get(s.id) ?? false;
+    return {
+      ...s,
+      registered,
+      status: running ? "running" : registered >= s.maxPlayers ? "starting" : "registering",
+    };
+  }));
+});
+
+/** POST /api/sng/:id/register — register an external agent in a SNG */
+httpApp.post("/api/sng/:id/register", (req: Request, res: Response): void => {
+  const sngId = req.params["id"]!;
+  const sng   = SNG_LIST.find((s) => s.id === sngId);
+  if (!sng) { res.status(404).json({ error: "SNG not found" }); return; }
+  if (sngRunning.get(sngId)) { res.status(409).json({ error: "SNG already running" }); return; }
+
+  const agentId = typeof (req.body as Record<string, unknown>)["agentId"] === "string"
+    ? (req.body as Record<string, unknown>)["agentId"] as string
+    : `ext-${Date.now()}`;
+
+  const registrants = sngRegistrants.get(sngId)!;
+  if (registrants.includes(agentId)) {
+    res.status(409).json({ error: "Already registered" }); return;
+  }
+  if (registrants.length >= sng.maxPlayers) {
+    res.status(409).json({ error: "SNG is full" }); return;
+  }
+
+  registrants.push(agentId);
+  const registered = registrants.length;
+  logInfo("SNG registration", { sngId, agentId, registered, maxPlayers: sng.maxPlayers });
+
+  if (registered >= sng.maxPlayers) {
+    void startSngGame(sngId);
+  }
+
+  res.json({ sngId, agentId, registered, maxPlayers: sng.maxPlayers });
 });
 
 // ---------------------------------------------------------------------------
@@ -544,24 +593,36 @@ httpApp.post("/api/agents/register", (req: Request, res: Response): void => {
     res.status(400).json({ error: '"name" is required' });
     return;
   }
-  const agentType = typeof cfg["type"] === "string" ? cfg["type"] : "custom";
+  const agentType       = typeof cfg["type"]            === "string" ? cfg["type"]            : "custom";
+  const preferredStakes = typeof cfg["preferredStakes"] === "string" ? cfg["preferredStakes"] : "low";
+  const gameType        = typeof cfg["gameType"]        === "string" ? cfg["gameType"]        : "cash";
+  const avatar          = typeof cfg["avatar"]          === "string" ? cfg["avatar"]          : undefined;
+  const model           = typeof cfg["model"]           === "string" ? cfg["model"]           : undefined;
+
   const result = agentBridge.registerAgent({
     name:         cfg["name"],
     type:         agentType,
     capabilities: Array.isArray(cfg["capabilities"]) ? (cfg["capabilities"] as string[]) : [],
   });
+
+  // Store routing preferences for use in handleConnect
+  agentPrefs.set(result.agentId, { preferredStakes, gameType, avatar });
+
   // Persist to Supabase and update global agent count
   const capabilities = Array.isArray(cfg["capabilities"]) ? (cfg["capabilities"] as string[]) : [];
-  void saveAgent(result.agentId, cfg["name"], undefined, capabilities, agentType);
+  void saveAgent(result.agentId, cfg["name"], avatar, capabilities, agentType);
   void incrementGlobalAgents();
   seenAgentIds.add(result.agentId);
 
   const host  = req.headers["host"] ?? `localhost:${PORT}`;
   const proto = req.headers["x-forwarded-proto"] === "https" ? "wss" : "ws";
   res.status(201).json({
-    agentId: result.agentId,
-    token:   result.token,
-    wsUrl:   `${proto}://${host}/ws`,
+    agentId:         result.agentId,
+    token:           result.token,
+    wsUrl:           `${proto}://${host}/ws`,
+    preferredStakes,
+    gameType,
+    ...(model ? { model } : {}),
   });
 });
 
@@ -577,9 +638,35 @@ httpApp.get("/api/agents/online", (_req: Request, res: Response): void => {
 // HTTP long-poll transport  (fallback when Railway drops WebSocket)
 // ---------------------------------------------------------------------------
 
+/** Return available cash tables filtered by agent's stakepreference. */
+function computeAvailableTables(agentId: string): unknown[] {
+  const prefs    = agentPrefs.get(agentId);
+  const stakes   = prefs?.preferredStakes ?? "low";
+  const blindMax = stakes === "micro" ? 5 : stakes === "low" ? 20 : stakes === "mid" ? 100 : Infinity;
+
+  return Array.from(activeBotTables.entries())
+    .filter(([, { config }]) => config.bigBlind <= blindMax)
+    .map(([tableId, { store, config }]) => {
+      const record = store.getTable(tableId);
+      const seated = record?.agents.size ?? 0;
+      return {
+        tableId,
+        name:       config.name,
+        blinds:     `$${config.smallBlind}/$${config.bigBlind}`,
+        players:    seated,
+        maxPlayers: config.maxPlayers,
+        hasSpace:   seated < config.maxPlayers,
+        waiting:    cashWaitingList.length, // how many ahead of this agent
+      };
+    });
+}
+
 httpApp.post("/api/agents/connect", (req: Request, res: Response): void => {
-  // Body already parsed by express.json() — pass directly to avoid double-read
-  httpAgentBridge.handleConnect(req.body as Record<string, unknown>, res);
+  const body  = req.body as Record<string, unknown>;
+  const token = typeof body["token"] === "string" ? body["token"] : "";
+  const agent = agentBridge.findAgentByToken(token);
+  const availableTables = agent ? computeAvailableTables(agent.agentId) : [];
+  httpAgentBridge.handleConnect(body, res, { availableTables });
 });
 
 httpApp.get("/api/agents/poll/:sessionId", (req: Request, res: Response): void => {
@@ -662,12 +749,18 @@ interface PresetTable {
 }
 
 const CASH_TABLES: PresetTable[] = [
-  { id: "micro",     name: "Micro Stakes", smallBlind: 1,   bigBlind: 2,   maxPlayers: 6, startingTokens: 200,    bots: [] },
-  { id: "low",       name: "Low Stakes",   smallBlind: 5,   bigBlind: 10,  maxPlayers: 6, startingTokens: 500,    bots: ["wolf", "owl"] },
-  { id: "mid",       name: "Mid Stakes",   smallBlind: 25,  bigBlind: 50,  maxPlayers: 9, startingTokens: 2_000,  bots: ["shark", "rock"] },
-  { id: "high",      name: "High Stakes",  smallBlind: 50,  bigBlind: 100, maxPlayers: 9, startingTokens: 4_000,  bots: ["mago", "caos"] },
-  { id: "nosebleed", name: "Nosebleed",    smallBlind: 100, bigBlind: 200, maxPlayers: 4, startingTokens: 10_000, bots: ["turtle", "fox"] },
-  { id: "heads-up",  name: "Heads Up",     smallBlind: 10,  bigBlind: 20,  maxPlayers: 2, startingTokens: 1_000,  bots: [] },
+  // 3 fill bots + 3 seats free for external agents
+  { id: "micro",     name: "Micro Stakes", smallBlind: 1,   bigBlind: 2,   maxPlayers: 6, startingTokens: 200,    bots: ["r1",  "r2",  "r3"] },
+  // 2 named + 2 fill + 2 seats free
+  { id: "low",       name: "Low Stakes",   smallBlind: 5,   bigBlind: 10,  maxPlayers: 6, startingTokens: 500,    bots: ["wolf", "owl",    "r4",  "r5"] },
+  // 2 named + 4 fill + 3 seats free
+  { id: "mid",       name: "Mid Stakes",   smallBlind: 25,  bigBlind: 50,  maxPlayers: 9, startingTokens: 2_000,  bots: ["shark", "rock",  "r6",  "r7",  "r8",  "r9"] },
+  // 2 named + 4 fill + 3 seats free
+  { id: "high",      name: "High Stakes",  smallBlind: 50,  bigBlind: 100, maxPlayers: 9, startingTokens: 4_000,  bots: ["mago", "caos",   "r10", "r11", "r12", "r13"] },
+  // 2 named + 2 fill = full 4-max
+  { id: "nosebleed", name: "Nosebleed",    smallBlind: 100, bigBlind: 200, maxPlayers: 4, startingTokens: 10_000, bots: ["turtle", "fox", "r14", "r15"] },
+  // 1 fill bot + 1 seat free (needs 1 external to run)
+  { id: "heads-up",  name: "Heads Up",     smallBlind: 10,  bigBlind: 20,  maxPlayers: 2, startingTokens: 1_000,  bots: ["r16"] },
 ];
 
 // ---------------------------------------------------------------------------
@@ -690,8 +783,71 @@ const SNG_LIST: SngEntry[] = [
   { id: "sng-knockout", name: "Knockout SNG", buyIn: 20, maxPlayers: 9, prizePool: 140, speed: "Turbo"   },
 ];
 
-// Mutable registered-player counts (incremented when agents join an SNG)
-const sngRegistered = new Map<string, number>(SNG_LIST.map((s) => [s.id, 0]));
+/** SNG registrant lists — agentId arrays per SNG (replaces simple count map). */
+const sngRegistrants = new Map<string, string[]>(SNG_LIST.map((s) => [s.id, []]));
+/** Whether a given SNG game is currently running. */
+const sngRunning     = new Map<string, boolean>(SNG_LIST.map((s) => [s.id, false]));
+
+/** Start a SNG game with its registered agents. Resets registration when done. */
+async function startSngGame(sngId: string): Promise<void> {
+  const sng = SNG_LIST.find((s) => s.id === sngId);
+  if (!sng) return;
+  if (sngRunning.get(sngId)) return; // already running
+  sngRunning.set(sngId, true);
+
+  const registrants = [...(sngRegistrants.get(sngId) ?? [])];
+  sngRegistrants.set(sngId, []); // reset for next round
+
+  const tableId       = `${sngId}-${Date.now()}`;
+  const startTokens   = sng.buyIn * 10 || 1_000;
+  const smallBlind    = Math.max(1, Math.floor(sng.buyIn / 10));
+  const bigBlind      = Math.max(2, Math.floor(sng.buyIn / 5));
+
+  const store = new GameStore();
+  const orch  = new AgentOrchestrator(store, {
+    tableId,
+    smallBlind,
+    bigBlind,
+    startingTokens: startTokens,
+  });
+
+  for (const agentId of registrants) {
+    const bot = new RandomBot({ id: agentId, tableId });
+    orch.registerAgent(bot);
+    seenAgentIds.add(agentId);
+  }
+
+  setupOrchHandlers(orch, store, tableId, sng.name);
+
+  logInfo(`SNG starting`, { sngId, table: tableId, players: registrants.length });
+  try {
+    await orch.playTournament(9_999, {
+      decisionTimeoutMs: 5_000,
+      handDelayMs:       HAND_DELAY_MS,
+      actionDelayMs:     ACTION_DELAY_MS,
+    });
+  } catch (err) {
+    logError("SNG error", { sngId, error: String(err) });
+  } finally {
+    sngRunning.set(sngId, false);
+    logInfo(`SNG complete — new registration open`, { sngId });
+    // Kick off next SNG round immediately if bots are waiting
+    void scheduleSngRefill(sngId);
+  }
+}
+
+/** Refill a completed SNG with simulated bots so the lobby shows it as active. */
+async function scheduleSngRefill(sngId: string): Promise<void> {
+  await sleep(IS_PROD ? 10_000 : 3_000);
+  const sng = SNG_LIST.find((s) => s.id === sngId);
+  if (!sng) return;
+  const registrants = sngRegistrants.get(sngId)!;
+  for (let i = 0; i < sng.maxPlayers; i++) {
+    registrants.push(`sng-${sngId}-refill-${i}-${Date.now()}`);
+  }
+  logInfo(`SNG refilled with bots`, { sngId, count: sng.maxPlayers });
+  void startSngGame(sngId);
+}
 
 // ---------------------------------------------------------------------------
 // MTT configuration
@@ -736,6 +892,7 @@ function nextMttStartMs(m: MttEntry): number {
 type BotClass = new (opts: { id: string; tableId: string }) => BaseAgent;
 
 const BOT_CLASS_MAP: Record<string, BotClass> = {
+  // Named personality bots
   shark:  AggressiveBot,
   rock:   ConservativeBot,
   mago:   BlufferBot,
@@ -745,16 +902,40 @@ const BOT_CLASS_MAP: Record<string, BotClass> = {
   owl:    OwlBot,
   turtle: TurtleBot,
   fox:    FoxBot,
+  // Fill bots — RandomBot instances to populate tables and make games run
+  ...Object.fromEntries(
+    Array.from({ length: 40 }, (_, i) => [`r${i + 1}`, RandomBot] as [string, BotClass])
+  ),
 };
 
 /** Active bot table entries — used by GET /api/tables and /api/stats. */
-const activeBotTables = new Map<string, { store: GameStore; config: PresetTable }>();
+const activeBotTables = new Map<string, { store: GameStore; config: PresetTable; orch: AgentOrchestrator }>();
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // In production, slow the game loop to reduce log volume and CPU pressure on Railway.
 const HAND_DELAY_MS   = IS_PROD ? 2_000 : 0;
 const ACTION_DELAY_MS = IS_PROD ?   200 : 0;
+
+/** Try seating the next agent from the global waiting list into the given table. */
+function trySeatingWaiting(tableId: string, store: GameStore, config: PresetTable): void {
+  const record = store.getTable(tableId);
+  if (!record) return;
+  const space = config.maxPlayers - record.agents.size;
+  if (space <= 0 || cashWaitingList.length === 0) return;
+
+  // Seat as many waiting agents as there are open slots
+  let seated = 0;
+  while (seated < space && cashWaitingList.length > 0) {
+    const agentId = cashWaitingList.shift()!;
+    const ok = httpAgentBridge.seatSession(agentId, tableId);
+    if (ok) {
+      logInfo("Seated waiting agent", { agentId, tableId, queueRemaining: cashWaitingList.length });
+      seated++;
+    }
+    // If ok=false, agent disconnected; loop continues with next in queue
+  }
+}
 
 /** Attach orchestrator event handlers (decision / chat / hand_complete). */
 function setupOrchHandlers(orch: AgentOrchestrator, store: GameStore, tableId: string, tableName: string): void {
@@ -818,6 +999,10 @@ function setupOrchHandlers(orch: AgentOrchestrator, store: GameStore, tableId: s
       }
     }
 
+    // Seat any waiting agents when a hand ends (a seat may have freed up)
+    const tableEntry = activeBotTables.get(tableId);
+    if (tableEntry) trySeatingWaiting(tableId, tableEntry.store, tableEntry.config);
+
     // Track recent hands for /api/recent-hands
     recentHands.unshift({
       tableId,
@@ -868,7 +1053,7 @@ function createOverflowTable(baseTableId: string): string | undefined {
   const tableRecord = store.getTable(newId);
   if (tableRecord) tableRecord.config.maxPlayers = newConfig.maxPlayers;
 
-  activeBotTables.set(newId, { store, config: newConfig });
+  activeBotTables.set(newId, { store, config: newConfig, orch });
   agentBridge.registerBotTable(store, newId, orch, newConfig.startingTokens);
   httpAgentBridge.registerBotTable(store, newId, orch, newConfig.startingTokens);
   setupOrchHandlers(orch, store, newId, newConfig.name);
@@ -904,7 +1089,7 @@ async function runTableSession(cfg: PresetTable, sessionN: number): Promise<void
   const tableRecord = store.getTable(cfg.id);
   if (tableRecord) tableRecord.config.maxPlayers = cfg.maxPlayers;
 
-  activeBotTables.set(cfg.id, { store, config: cfg });
+  activeBotTables.set(cfg.id, { store, config: cfg, orch });
 
   // Wire external agents into this table's store + orchestrator.
   agentBridge.registerBotTable(store, cfg.id, orch, cfg.startingTokens);
@@ -958,6 +1143,14 @@ async function runTableLoop(cfg: PresetTable): Promise<void> {
 agentBridge.setOnTableFull(createOverflowTable);
 httpAgentBridge.setOnTableFull(createOverflowTable);
 
+// Register waiting-list callback — agents that can't be seated go here
+httpAgentBridge.setOnWaitlisted((agentId: string) => {
+  if (!cashWaitingList.includes(agentId)) {
+    cashWaitingList.push(agentId);
+    logInfo("Agent waitlisted", { agentId, queueDepth: cashWaitingList.length });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Supabase diagnostics — always log at startup so Railway logs show status
 // ---------------------------------------------------------------------------
@@ -988,3 +1181,25 @@ logInfo(`Bot game loops starting`, {
 
 // Start all table loops concurrently
 void Promise.all(CASH_TABLES.map((cfg) => runTableLoop(cfg)));
+
+// Pre-populate SNGs and MTTs with simulated bots so lobby looks active.
+// Delayed so table loops have time to register their stores first.
+setTimeout(() => {
+  // --- SNGs: fill each SNG to maxPlayers with simulated bots → auto-start ---
+  for (const sng of SNG_LIST) {
+    const registrants = sngRegistrants.get(sng.id)!;
+    for (let i = 0; i < sng.maxPlayers; i++) {
+      registrants.push(`sng-${sng.id}-bot-${i}`);
+    }
+    logInfo(`SNG pre-populated`, { sngId: sng.id, players: registrants.length });
+    void startSngGame(sng.id);
+  }
+
+  // --- MTTs: register simulated agents to make counters look real ---
+  const mttBotsPerTournament = Math.ceil(30 / MTT_LIST.length);
+  for (const mtt of MTT_LIST) {
+    const current = mttRegistered.get(mtt.id) ?? 0;
+    mttRegistered.set(mtt.id, current + mttBotsPerTournament);
+  }
+  logInfo("MTT registrations filled", { botsPerTournament: mttBotsPerTournament });
+}, IS_PROD ? 5_000 : 2_000);
