@@ -308,9 +308,9 @@ httpApp.get("/api/activity", (_req: Request, res: Response): void => {
 // ---------------------------------------------------------------------------
 
 httpApp.get("/api/tables", (_req: Request, res: Response): void => {
-  const tables = PRESET_TABLES.map((cfg) => {
-    const entry = activeBotTables.get(cfg.id);
-    const record = entry?.store.getTable(cfg.id);
+  // Return ALL active tables (presets + overflow) sorted by name
+  const tables = Array.from(activeBotTables.entries()).map(([tableId, { store, config }]) => {
+    const record = store.getTable(tableId);
     const seats = record?.state.seats ?? [];
     const activePot = record?.state.mainPot ?? 0;
     const status = !record
@@ -319,17 +319,18 @@ httpApp.get("/api/tables", (_req: Request, res: Response): void => {
         ? "waiting"
         : "active";
     return {
-      id:          cfg.id,
-      name:        cfg.name,
-      smallBlind:  cfg.smallBlind,
-      bigBlind:    cfg.bigBlind,
-      maxPlayers:  cfg.maxPlayers,
-      players:     seats.length,
-      pot:         activePot,
+      id:         tableId,
+      name:       config.name,
+      smallBlind: config.smallBlind,
+      bigBlind:   config.bigBlind,
+      maxPlayers: config.maxPlayers,
+      players:    seats.length,
+      pot:        activePot,
       status,
-      handNumber:  record?.state.handNumber ?? 0,
+      handNumber: record?.state.handNumber ?? 0,
     };
   });
+  tables.sort((a, b) => a.name.localeCompare(b.name));
   res.json(tables);
 });
 
@@ -693,22 +694,23 @@ function setupOrchHandlers(orch: AgentOrchestrator, store: GameStore, tableId: s
       if (r) { r.wins++; r.elo = Math.min(2000, r.elo + Math.floor(winner.amountWon / 10)); }
     }
 
-    // Persist to Supabase (fire-and-forget)
-    void incrementGlobalHands();
-    const playerSnapshot = record?.state.seats.map((s) => ({
-      agentId: s.agentId, stack: s.stack, status: s.status,
-    })) ?? [];
-    void saveHandResult(
-      tableId,
-      result.handNumber,
-      result.winners.map((w) => w.agentId),
-      result.winners.reduce((s, w) => s + w.amountWon, 0),
-      playerSnapshot,
-    );
-    // Update agent stats for each seated agent
-    for (const agentId of seatedAgentIds) {
-      const r = eloMap.get(agentId);
-      if (r) void updateAgentStats(agentId, r.hands, r.wins, r.elo);
+    // Persist to Supabase every 10 hands to reduce write traffic
+    if (totalHands % 10 === 0) {
+      void incrementGlobalHands(10);
+      const playerSnapshot = record?.state.seats.map((s) => ({
+        agentId: s.agentId, stack: s.stack, status: s.status,
+      })) ?? [];
+      void saveHandResult(
+        tableId,
+        result.handNumber,
+        result.winners.map((w) => w.agentId),
+        result.winners.reduce((s, w) => s + w.amountWon, 0),
+        playerSnapshot,
+      );
+      for (const agentId of seatedAgentIds) {
+        const r = eloMap.get(agentId);
+        if (r) void updateAgentStats(agentId, r.hands, r.wins, r.elo);
+      }
     }
 
     if (!IS_PROD || totalHands % 10 === 0) {
@@ -858,12 +860,6 @@ if (isDbAvailable()) {
   for (const [botId, r] of eloMap) {
     void saveAgent(botId, r.name, r.emoji, [], "simulated");
   }
-  // Test: try to write a hands increment to confirm write access works
-  void incrementGlobalHands(0).then(() => {
-    logInfo("[DB] Test write (incrementGlobalHands(0)) completed — check logs above for errors");
-  }).catch((err) => {
-    logError("[DB] Test write FAILED", { error: String(err) });
-  });
 } else {
   logWarn("[DB] Supabase NOT available — all DB writes will be skipped");
 }

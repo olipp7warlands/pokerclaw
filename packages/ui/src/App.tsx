@@ -37,6 +37,7 @@ function LobbyView({ tables, onTableCreated }: { tables: LobbyTable[]; onTableCr
   return (
     <Layout>
       <Header
+        onLogoClick={() => navigate("/")}
         right={
           <button
             className="flex items-center gap-2 px-3 py-1.5 border border-white/10
