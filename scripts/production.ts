@@ -251,15 +251,16 @@ httpApp.get("/health", (_req: Request, res: Response): void => {
 // ---------------------------------------------------------------------------
 
 httpApp.get("/api/stats", (_req: Request, res: Response): void => {
-  const httpSessions = httpAgentBridge.sessionCount;
-  const wsAgents     = agentBridge.listOnlineAgents().length;
+  const httpSessions     = httpAgentBridge.sessionCount;
+  const registeredAgents = agentBridge.listAgents().length; // all registered (not just WS-active)
 
   // Try Supabase first (persistent across restarts), fall back to in-memory
   void getGlobalStats().then((dbStats) => {
     res.json({
-      totalHands:   dbStats ? Number(dbStats.total_hands)  : totalHands,
+      // Use max(DB, in-memory) so counter reflects real-time plays even when DB lags
+      totalHands:   dbStats ? Math.max(Number(dbStats.total_hands), totalHands) : totalHands,
       totalAgents:  dbStats ? Number(dbStats.total_agents) : seenAgentIds.size + httpSessions,
-      onlineAgents: wsAgents + httpSessions,
+      onlineAgents: registeredAgents + httpSessions, // all registered agents, not just WS-active
       activeTables: activeBotTables.size,
       topELO:       [],
     });
@@ -648,10 +649,10 @@ interface PresetTable {
 
 const CASH_TABLES: PresetTable[] = [
   { id: "micro",     name: "Micro Stakes", smallBlind: 1,   bigBlind: 2,   maxPlayers: 6, startingTokens: 200,    bots: [] },
-  { id: "low",       name: "Low Stakes",   smallBlind: 5,   bigBlind: 10,  maxPlayers: 6, startingTokens: 500,    bots: ["wolf", "owl", "turtle", "fox"] },
-  { id: "mid",       name: "Mid Stakes",   smallBlind: 25,  bigBlind: 50,  maxPlayers: 9, startingTokens: 2_000,  bots: ["shark", "rock", "mago", "caos"] },
-  { id: "high",      name: "High Stakes",  smallBlind: 50,  bigBlind: 100, maxPlayers: 9, startingTokens: 4_000,  bots: [] },
-  { id: "nosebleed", name: "Nosebleed",    smallBlind: 100, bigBlind: 200, maxPlayers: 4, startingTokens: 10_000, bots: [] },
+  { id: "low",       name: "Low Stakes",   smallBlind: 5,   bigBlind: 10,  maxPlayers: 6, startingTokens: 500,    bots: ["wolf", "owl"] },
+  { id: "mid",       name: "Mid Stakes",   smallBlind: 25,  bigBlind: 50,  maxPlayers: 9, startingTokens: 2_000,  bots: ["shark", "rock"] },
+  { id: "high",      name: "High Stakes",  smallBlind: 50,  bigBlind: 100, maxPlayers: 9, startingTokens: 4_000,  bots: ["mago", "caos"] },
+  { id: "nosebleed", name: "Nosebleed",    smallBlind: 100, bigBlind: 200, maxPlayers: 4, startingTokens: 10_000, bots: ["turtle", "fox"] },
   { id: "heads-up",  name: "Heads Up",     smallBlind: 10,  bigBlind: 20,  maxPlayers: 2, startingTokens: 1_000,  bots: [] },
 ];
 
@@ -926,7 +927,8 @@ async function runTableSession(cfg: PresetTable, sessionN: number): Promise<void
   } finally {
     agentBridge.unregisterBotTable(cfg.id);
     httpAgentBridge.unregisterBotTable(cfg.id);
-    activeBotTables.delete(cfg.id);
+    // Keep activeBotTables entry — table stays visible in /api/tables between sessions.
+    // Next session startup will overwrite with a fresh store.
   }
 }
 
