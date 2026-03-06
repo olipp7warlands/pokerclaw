@@ -7,10 +7,10 @@ import {
   type LobbyTable,
   type LobbyTournament,
 } from "../../lib/demo-lobby.js";
-import { TournamentCard }   from "./TournamentCard.js";
 import { CashTableRow }     from "./CashTableRow.js";
 import { LeaderboardPanel } from "./LeaderboardPanel.js";
 import { CreateTableModal } from "./CreateTableModal.js";
+import { formatTokens }     from "../../lib/utils.js";
 
 interface Props {
   initialTables?: LobbyTable[];
@@ -41,7 +41,27 @@ interface PrizePool {
   valueUSD:   number;
 }
 
-type TabId = "cash" | "tournaments" | "sitgo";
+interface RecentHand {
+  tableId:    string;
+  tableName:  string;
+  handNumber: number;
+  winners:    Array<{ agentId: string; amountWon: number }>;
+  ts:         string;
+}
+
+// Unified row that merges cash tables + tournaments for the single list
+interface UnifiedRow {
+  id:         string;
+  name:       string;
+  type:       "Cash" | "Tournament" | "Sit & Go";
+  stakes:     string;
+  players:    number;
+  maxPlayers: number;
+  avgPot:     number;
+  isPlaying:  boolean;
+  // Original source id for navigation
+  tableId:    string;
+}
 
 function mapApiTable(t: ApiTable): LobbyTable {
   return {
@@ -56,6 +76,36 @@ function mapApiTable(t: ApiTable): LobbyTable {
   };
 }
 
+function buildUnifiedRows(tables: LobbyTable[], tournaments: LobbyTournament[]): UnifiedRow[] {
+  const rows: UnifiedRow[] = [
+    ...tables.map((t) => ({
+      id:         t.id,
+      name:       t.name,
+      type:       "Cash" as const,
+      stakes:     `$${t.blinds.small}/$${t.blinds.big}`,
+      players:    t.currentPlayers,
+      maxPlayers: t.maxSeats,
+      avgPot:     t.avgPot,
+      isPlaying:  t.status === "playing",
+      tableId:    t.id,
+    })),
+    ...tournaments.map((t) => ({
+      id:         t.id,
+      name:       t.name,
+      type:       (t.id.startsWith("sitgo-") ? "Sit & Go" : "Tournament") as "Sit & Go" | "Tournament",
+      stakes:     `${t.buyIn} buy-in`,
+      players:    t.currentPlayers,
+      maxPlayers: t.maxPlayers,
+      avgPot:     0,
+      isPlaying:  t.status === "running",
+      tableId:    t.id,
+    })),
+  ];
+  // Sort by players desc, then name asc
+  rows.sort((a, b) => b.players - a.players || a.name.localeCompare(b.name));
+  return rows;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -64,6 +114,13 @@ function fmtTokens(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
   if (n >= 1_000)     return (n / 1_000).toFixed(1) + "K";
   return String(Math.round(n));
+}
+
+function timeAgo(ts: string): string {
+  const s = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  return `${Math.floor(s / 3600)}h ago`;
 }
 
 // ---------------------------------------------------------------------------
@@ -138,131 +195,166 @@ function HDivider() {
 }
 
 // ---------------------------------------------------------------------------
-// Tab bar
+// Unified table row
 // ---------------------------------------------------------------------------
 
-const TABS: { id: TabId; label: string }[] = [
-  { id: "cash",        label: "🎰  Cash Games"  },
-  { id: "tournaments", label: "🏆  Tournaments"  },
-  { id: "sitgo",       label: "⚡  Sit & Go"     },
-];
+const TYPE_STYLES: Record<string, { color: string; bg: string }> = {
+  "Cash":       { color: "#d4af37",  bg: "rgba(212,175,55,0.12)"  },
+  "Tournament": { color: "#818cf8",  bg: "rgba(129,140,248,0.12)" },
+  "Sit & Go":   { color: "#4ade80",  bg: "rgba(74,222,128,0.12)"  },
+};
 
-function TabBar({ active, onChange }: { active: TabId; onChange: (t: TabId) => void }) {
+function UnifiedTableRow({
+  row, index, onJoin, onWatch, onNavigate,
+}: {
+  row:        UnifiedRow;
+  index:      number;
+  onJoin?:    ((id: string) => void) | undefined;
+  onWatch?:   ((id: string) => void) | undefined;
+  onNavigate?: ((id: string) => void) | undefined;
+}) {
+  const isFull       = row.players >= row.maxPlayers;
+  const isAlmostFull = row.players >= row.maxPlayers - 1 && !isFull;
+  const isEmpty      = row.players === 0;
+
+  const playerColor = isFull ? "#f87171" : isAlmostFull ? "#fbbf24" : isEmpty ? "rgba(255,255,255,0.25)" : "#4ade80";
+  const typeStyle   = TYPE_STYLES[row.type] ?? TYPE_STYLES["Cash"]!;
+
   return (
-    <div
-      style={{
-        display:      "flex",
-        borderBottom: "1px solid rgba(255,255,255,0.06)",
-        background:   "rgba(0,0,0,0.2)",
-        flexShrink:   0,
-        paddingLeft:  16,
-        gap:          4,
-      }}
+    <motion.tr
+      initial={{ opacity: 0, x: -8 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={{ delay: Math.min(index * 0.035, 0.4) }}
+      onClick={() => onNavigate?.(row.tableId)}
+      className="border-b border-white/5 cursor-pointer"
+      whileHover={{ backgroundColor: "rgba(212,175,55,0.04)", boxShadow: "inset 3px 0 0 rgba(212,175,55,0.6)" }}
     >
-      {TABS.map((tab) => {
-        const isActive = tab.id === active;
-        return (
-          <button
-            key={tab.id}
-            onClick={() => onChange(tab.id)}
-            style={{
-              background:   "none",
-              border:       "none",
-              borderBottom: isActive ? "2px solid #d4af37" : "2px solid transparent",
-              color:        isActive ? "#d4af37" : "rgba(255,255,255,0.38)",
-              cursor:       "pointer",
-              fontFamily:   "monospace",
-              fontSize:     12,
-              fontWeight:   isActive ? 700 : 400,
-              letterSpacing: "0.06em",
-              padding:      "10px 18px",
-              transition:   "all 0.15s",
-              marginBottom: -1,
-            }}
+      {/* Table name */}
+      <td className="py-2.5 px-3 text-sm text-white/85 font-mono">
+        <span className="flex items-center gap-2">
+          {row.isPlaying && (
+            <span
+              className="inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 animate-pulse"
+              style={{ background: "#4ade80", boxShadow: "0 0 5px rgba(74,222,128,0.8)" }}
+            />
+          )}
+          {row.name}
+        </span>
+      </td>
+
+      {/* Game */}
+      <td className="py-2.5 px-3 text-xs font-mono text-white/35">NL Hold&apos;em</td>
+
+      {/* Stakes */}
+      <td className="py-2.5 px-3 text-xs font-mono font-bold" style={{ color: "#d4af37" }}>
+        {row.stakes}
+      </td>
+
+      {/* Type badge */}
+      <td className="py-2.5 px-3">
+        <span
+          className="px-1.5 py-0.5 text-[10px] font-mono rounded"
+          style={{ color: typeStyle.color, background: typeStyle.bg }}
+        >
+          {row.type}
+        </span>
+      </td>
+
+      {/* Players */}
+      <td className="py-2.5 px-3 text-xs font-mono">
+        <span style={{ color: playerColor, fontWeight: 600 }}>{row.players}</span>
+        <span className="text-white/22">/{row.maxPlayers}</span>
+      </td>
+
+      {/* Avg pot */}
+      <td className="py-2.5 px-3 text-xs font-mono text-white/45">
+        {row.avgPot > 0 ? formatTokens(row.avgPot) : <span className="text-white/18">—</span>}
+      </td>
+
+      {/* Actions */}
+      <td className="py-2.5 px-3 text-right" onClick={(e) => e.stopPropagation()}>
+        <span className="flex items-center justify-end gap-1.5">
+          {!isFull && (
+            <motion.button
+              whileHover={{ scale: 1.06 }}
+              whileTap={{ scale: 0.94 }}
+              onClick={(e) => { e.stopPropagation(); onJoin?.(row.tableId); }}
+              className="px-2.5 py-0.5 text-[10px] font-mono font-bold rounded"
+              style={{ background: "rgba(212,175,55,0.1)", border: "1.5px solid rgba(212,175,55,0.5)", color: "#d4af37" }}
+            >
+              JOIN
+            </motion.button>
+          )}
+          <motion.button
+            whileHover={{ scale: 1.06 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={(e) => { e.stopPropagation(); onWatch?.(row.tableId); }}
+            className="px-2.5 py-0.5 text-[10px] font-mono font-bold rounded"
+            style={{ border: "1.5px solid rgba(212,175,55,0.3)", color: "rgba(212,175,55,0.6)" }}
           >
-            {tab.label}
-          </button>
-        );
-      })}
-    </div>
+            WATCH
+          </motion.button>
+        </span>
+      </td>
+    </motion.tr>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Cash Games table (PokerStars style)
+// Recent Hands
 // ---------------------------------------------------------------------------
 
-const TABLE_HEADERS = ["Table", "Game", "Stakes", "Type", "Players", "Avg Pot", "~USD", ""];
-
-function CashGamesTab({
-  tables, onJoin, onWatch, onNavigate, onCreateTable,
-}: {
-  tables:        LobbyTable[];
-  onJoin?:       ((id: string) => void) | undefined;
-  onWatch?:      ((id: string) => void) | undefined;
-  onNavigate?:   ((id: string) => void) | undefined;
-  onCreateTable: () => void;
-}) {
+function RecentHandsSection({ hands }: { hands: RecentHand[] }) {
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-center justify-between">
-        <span className="text-white/30 text-[11px] font-mono">
-          {tables.length} table{tables.length !== 1 ? "s" : ""} available
-        </span>
-        <motion.button
-          whileHover={{ scale: 1.04 }}
-          whileTap={{ scale: 0.97 }}
-          onClick={onCreateTable}
-          className="px-2.5 py-1 border border-gold/30 text-gold text-[10px] font-mono
-                     rounded hover:border-gold/60 hover:bg-gold/5 transition-colors"
-        >
-          + CREATE TABLE
-        </motion.button>
-      </div>
+    <div className="flex flex-col gap-2">
+      <h2 className="font-display text-sm font-bold text-white/80 tracking-widest uppercase flex items-center gap-2">
+        <span>🃏</span>
+        <span>Recent Hands</span>
+      </h2>
 
-      <div
-        className="border border-white/8 rounded-lg overflow-hidden"
-        style={{ background: "rgba(255,255,255,0.015)" }}
-      >
-        <table className="w-full">
-          <thead style={{ position: "sticky", top: 0, zIndex: 10 }}>
-            <tr
-              className="border-b border-white/8"
-              style={{ background: "rgba(10,10,15,0.95)" }}
-            >
-              {TABLE_HEADERS.map((h, i) => (
-                <th
-                  key={i}
-                  className={`py-2 px-3 text-[9px] font-mono text-white/25 uppercase tracking-widest
-                    ${i === 6 ? "text-right" : "text-left"}`}
-                >
-                  {h}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {tables.length === 0 ? (
-              <tr>
-                <td colSpan={8} className="py-8 text-center text-white/20 text-xs font-mono">
-                  No active tables — waiting for server…
-                </td>
-              </tr>
-            ) : (
-              tables.map((t, i) => (
-                <CashTableRow
-                  key={t.id}
-                  table={t}
-                  index={i}
-                  onJoin={onJoin}
-                  onWatch={onWatch}
-                  onNavigate={onNavigate}
-                />
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
+      {hands.length === 0 ? (
+        <div className="text-center py-6 text-white/18 text-xs font-mono border border-white/5 rounded-lg">
+          Waiting for first hand to complete…
+        </div>
+      ) : (
+        <div
+          className="border border-white/8 rounded-lg overflow-hidden"
+          style={{ background: "rgba(255,255,255,0.015)" }}
+        >
+          {hands.map((h, i) => {
+            const topWinner = h.winners[0];
+            const totalPot  = h.winners.reduce((s, w) => s + w.amountWon, 0);
+            return (
+              <motion.div
+                key={`${h.tableId}-${h.handNumber}`}
+                initial={{ opacity: 0, x: -6 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ delay: i * 0.04 }}
+                className="flex items-center justify-between px-4 py-2.5 border-b border-white/5 last:border-0"
+                style={{ background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.01)" }}
+              >
+                <span className="text-xs font-mono text-white/35">
+                  <span className="text-white/55">[{h.tableName}]</span>
+                  {" "}Hand #{h.handNumber}
+                </span>
+                <span className="text-xs font-mono">
+                  {topWinner ? (
+                    <>
+                      <span style={{ color: "#d4af37" }}>{topWinner.agentId}</span>
+                      <span className="text-white/35"> won </span>
+                      <span style={{ color: "#4ade80" }}>{fmtTokens(totalPot)}</span>
+                      <span className="text-white/20"> tokens</span>
+                    </>
+                  ) : (
+                    <span className="text-white/25">No winner recorded</span>
+                  )}
+                </span>
+                <span className="text-[10px] font-mono text-white/20">{timeAgo(h.ts)}</span>
+              </motion.div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -276,10 +368,10 @@ export function LobbyScreen({ initialTables, onJoinTable, onWatchTable, onTableC
   const [tournaments, setTournaments] = useState<LobbyTournament[]>(DEMO_TOURNAMENTS);
   const [stats,       setStats]       = useState<ApiStats | null>(null);
   const [prizePool,   setPrizePool]   = useState<PrizePool | null>(null);
-  const [activeTab,   setActiveTab]   = useState<TabId>("cash");
+  const [recentHands, setRecentHands] = useState<RecentHand[]>([]);
   const [createModalOpen, setCreate]  = useState(false);
 
-  // Poll /api/tables, /api/tournaments, /api/stats, /api/prizepool every 3s
+  // Poll /api/tables + /api/stats + /api/prizepool every 3s
   useEffect(() => {
     let cancelled = false;
     async function poll() {
@@ -291,7 +383,6 @@ export function LobbyScreen({ initialTables, onJoinTable, onWatchTable, onTableC
           fetch("/api/prizepool"),
         ]);
         if (cancelled) return;
-        // Always use server data when server responds — never fall back to demo
         if (tablesRes.ok) {
           const data: ApiTable[] = await tablesRes.json() as ApiTable[];
           setTables(data.map(mapApiTable));
@@ -300,18 +391,26 @@ export function LobbyScreen({ initialTables, onJoinTable, onWatchTable, onTableC
           const data: LobbyTournament[] = await tournamentsRes.json() as LobbyTournament[];
           setTournaments(data.length > 0 ? data : []);
         }
-        if (statsRes.ok) {
-          const data: ApiStats = await statsRes.json() as ApiStats;
-          setStats(data);
-        }
-        if (ppRes.ok) {
-          const data = await ppRes.json() as PrizePool;
-          setPrizePool(data);
-        }
-      } catch { /* network error — keep previous data */ }
+        if (statsRes.ok) setStats(await statsRes.json() as ApiStats);
+        if (ppRes.ok)    setPrizePool(await ppRes.json() as PrizePool);
+      } catch { /* keep previous data */ }
     }
     void poll();
     const id = setInterval(() => { void poll(); }, 3_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  // Poll /api/recent-hands every 5s
+  useEffect(() => {
+    let cancelled = false;
+    async function poll() {
+      try {
+        const r = await fetch("/api/recent-hands");
+        if (r.ok && !cancelled) setRecentHands(await r.json() as RecentHand[]);
+      } catch { /* keep previous */ }
+    }
+    void poll();
+    const id = setInterval(() => { void poll(); }, 5_000);
     return () => { cancelled = true; clearInterval(id); };
   }, []);
 
@@ -320,9 +419,7 @@ export function LobbyScreen({ initialTables, onJoinTable, onWatchTable, onTableC
     onTableCreated?.(table);
   }
 
-  // Split tournaments by type
-  const sitGoTournaments      = tournaments.filter((t) => t.id.startsWith("sitgo-"));
-  const regularTournaments    = tournaments.filter((t) => !t.id.startsWith("sitgo-"));
+  const unifiedRows = buildUnifiedRows(tables, tournaments);
 
   return (
     <>
@@ -333,50 +430,72 @@ export function LobbyScreen({ initialTables, onJoinTable, onWatchTable, onTableC
       <div className="flex flex-1 overflow-hidden justify-center">
         <div className="flex w-full max-w-[1200px] overflow-hidden">
 
-          {/* Left column: tabs + content */}
-          <div className="flex-1 overflow-hidden flex flex-col min-w-0">
-            <TabBar active={activeTab} onChange={setActiveTab} />
+          {/* Left column: unified table + recent hands */}
+          <div className="flex-1 overflow-y-auto p-5 flex flex-col gap-6 min-w-0">
 
-            <div className="flex-1 overflow-y-auto p-5">
-              {activeTab === "cash" && (
-                <CashGamesTab
-                  tables={tables}
-                  onJoin={onJoinTable}
-                  onWatch={onWatchTable}
-                  onNavigate={onJoinTable}
-                  onCreateTable={() => setCreate(true)}
-                />
-              )}
-
-              {activeTab === "tournaments" && (
-                <div className="flex flex-col gap-2.5">
-                  {regularTournaments.length === 0 ? (
-                    <div className="text-center py-16 text-white/20 text-xs font-mono">
-                      No tournaments running — check back soon
-                    </div>
-                  ) : (
-                    regularTournaments.map((t) => (
-                      <TournamentCard key={t.id} tournament={t} onRegister={onJoinTable} />
-                    ))
-                  )}
-                </div>
-              )}
-
-              {activeTab === "sitgo" && (
-                <div className="flex flex-col gap-2.5">
-                  {sitGoTournaments.length === 0 ? (
-                    <div className="text-center py-16 text-white/20 text-xs font-mono">
-                      No Sit & Go tables running yet
-                      <div className="mt-1 text-[10px]">Requires 16+ agents online</div>
-                    </div>
-                  ) : (
-                    sitGoTournaments.map((t) => (
-                      <TournamentCard key={t.id} tournament={t} onRegister={onJoinTable} />
-                    ))
-                  )}
-                </div>
-              )}
+            {/* Section header */}
+            <div className="flex items-center justify-between">
+              <h2 className="font-display text-sm font-bold text-white/80 tracking-widest uppercase flex items-center gap-2">
+                <span>🎰</span>
+                <span>All Tables</span>
+                <span className="text-white/25 font-normal text-[10px] normal-case tracking-normal">
+                  ({unifiedRows.length} active)
+                </span>
+              </h2>
+              <motion.button
+                whileHover={{ scale: 1.04 }}
+                whileTap={{ scale: 0.97 }}
+                onClick={() => setCreate(true)}
+                className="px-2.5 py-1 border border-gold/30 text-gold text-[10px] font-mono
+                           rounded hover:border-gold/60 hover:bg-gold/5 transition-colors"
+              >
+                + CREATE TABLE
+              </motion.button>
             </div>
+
+            {/* Unified table */}
+            <div
+              className="border border-white/8 rounded-lg overflow-hidden"
+              style={{ background: "rgba(255,255,255,0.015)" }}
+            >
+              <table className="w-full">
+                <thead style={{ position: "sticky", top: 0, zIndex: 10 }}>
+                  <tr className="border-b border-white/8" style={{ background: "rgba(10,10,15,0.95)" }}>
+                    {["Table", "Game", "Stakes", "Type", "Players", "Avg Pot", ""].map((h, i) => (
+                      <th
+                        key={i}
+                        className="py-2 px-3 text-[9px] font-mono text-white/25 uppercase tracking-widest text-left"
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {unifiedRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="py-10 text-center text-white/18 text-xs font-mono">
+                        No active tables — server starting up…
+                      </td>
+                    </tr>
+                  ) : (
+                    unifiedRows.map((row, i) => (
+                      <UnifiedTableRow
+                        key={row.id}
+                        row={row}
+                        index={i}
+                        onJoin={onJoinTable}
+                        onWatch={onWatchTable}
+                        onNavigate={onJoinTable}
+                      />
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Recent Hands */}
+            <RecentHandsSection hands={recentHands} />
           </div>
 
           {/* Right column: Leaderboard */}

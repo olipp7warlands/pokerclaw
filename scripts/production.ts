@@ -155,7 +155,16 @@ interface ActivityEvent {
   ts:      string;
 }
 
+interface RecentHand {
+  tableId:    string;
+  tableName:  string;
+  handNumber: number;
+  winners:    Array<{ agentId: string; amountWon: number }>;
+  ts:         string;
+}
+
 const recentActivity: ActivityEvent[] = [];
+const recentHands:    RecentHand[]    = [];
 
 // ---------------------------------------------------------------------------
 // Express app
@@ -301,6 +310,14 @@ httpApp.get("/api/leaderboard", (_req: Request, res: Response): void => {
 
 httpApp.get("/api/activity", (_req: Request, res: Response): void => {
   res.json(recentActivity.slice(0, 20));
+});
+
+// ---------------------------------------------------------------------------
+// Recent hands (last 5 completed hands across all tables)
+// ---------------------------------------------------------------------------
+
+httpApp.get("/api/recent-hands", (_req: Request, res: Response): void => {
+  res.json(recentHands.slice(0, 5));
 });
 
 // ---------------------------------------------------------------------------
@@ -652,7 +669,7 @@ const HAND_DELAY_MS   = IS_PROD ? 2_000 : 0;
 const ACTION_DELAY_MS = IS_PROD ?   200 : 0;
 
 /** Attach orchestrator event handlers (decision / chat / hand_complete). */
-function setupOrchHandlers(orch: AgentOrchestrator, store: GameStore, tableId: string): void {
+function setupOrchHandlers(orch: AgentOrchestrator, store: GameStore, tableId: string, tableName: string): void {
   orch.on("decision", ({ agentId, decision }: { agentId: string; decision: { action: string; amount?: number } }) => {
     const record = store.getTable(tableId);
     if (record) {
@@ -713,6 +730,16 @@ function setupOrchHandlers(orch: AgentOrchestrator, store: GameStore, tableId: s
       }
     }
 
+    // Track recent hands for /api/recent-hands
+    recentHands.unshift({
+      tableId,
+      tableName,
+      handNumber: result.handNumber,
+      winners:    result.winners.map((w) => ({ agentId: w.agentId, amountWon: w.amountWon })),
+      ts:         new Date().toISOString(),
+    });
+    if (recentHands.length > 20) recentHands.pop();
+
     if (!IS_PROD || totalHands % 10 === 0) {
       const wins = result.winners.map((w) => `${w.agentId}+${w.amountWon}`).join(", ");
       logInfo("Hand milestone", { table: tableId, totalHands, handNumber: result.handNumber, winners: wins });
@@ -756,7 +783,7 @@ function createOverflowTable(baseTableId: string): string | undefined {
   activeBotTables.set(newId, { store, config: newConfig });
   agentBridge.registerBotTable(store, newId, orch, newConfig.startingTokens);
   httpAgentBridge.registerBotTable(store, newId, orch, newConfig.startingTokens);
-  setupOrchHandlers(orch, store, newId);
+  setupOrchHandlers(orch, store, newId, newConfig.name);
 
   // Start the game loop (no bots — plays as soon as ≥2 external agents join)
   void orch.playTournament(9_999, {
@@ -809,7 +836,7 @@ async function runTableSession(cfg: PresetTable, sessionN: number): Promise<void
     logInfo(`Table "${cfg.name}" (${cfg.id}) ready — no bots, waiting for external agents`);
   }
 
-  setupOrchHandlers(orch, store, cfg.id);
+  setupOrchHandlers(orch, store, cfg.id, cfg.name);
 
   try {
     // Always run the game loop — even empty tables serve external agents
