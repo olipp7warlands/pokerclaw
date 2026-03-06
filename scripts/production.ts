@@ -317,7 +317,7 @@ httpApp.get("/api/activity", (_req: Request, res: Response): void => {
 // ---------------------------------------------------------------------------
 
 httpApp.get("/api/recent-hands", (_req: Request, res: Response): void => {
-  res.json(recentHands.slice(0, 5));
+  res.json(recentHands.slice(0, 10));
 });
 
 // ---------------------------------------------------------------------------
@@ -345,6 +345,7 @@ httpApp.get("/api/tables", (_req: Request, res: Response): void => {
       pot:        activePot,
       status,
       handNumber: record?.state.handNumber ?? 0,
+      type:       "cash",
     };
   });
   tables.sort((a, b) => a.name.localeCompare(b.name));
@@ -489,6 +490,36 @@ httpApp.get("/api/tournaments", (_req: Request, res: Response): void => {
 });
 
 // ---------------------------------------------------------------------------
+// Sit & Go (static configuration + live registered count)
+// ---------------------------------------------------------------------------
+
+httpApp.get("/api/sng", (_req: Request, res: Response): void => {
+  res.json(SNG_LIST.map((s) => ({
+    ...s,
+    registered: sngRegistered.get(s.id) ?? 0,
+    status:     (sngRegistered.get(s.id) ?? 0) >= s.maxPlayers ? "running" : "registering",
+  })));
+});
+
+// ---------------------------------------------------------------------------
+// MTT Tournaments (static schedule + live registration)
+// ---------------------------------------------------------------------------
+
+httpApp.get("/api/mtt", (_req: Request, res: Response): void => {
+  res.json(MTT_LIST.map((m) => {
+    const registered = mttRegistered.get(m.id) ?? 0;
+    const prizePool  = m.fixedPrize ?? m.buyIn * m.prizeMultiplier * Math.max(registered, 10);
+    return {
+      ...m,
+      registered,
+      prizePool,
+      startsInMs: nextMttStartMs(m),
+      status:     "scheduled",
+    };
+  }));
+});
+
+// ---------------------------------------------------------------------------
 // Agent registration (delegates to agentBridge)
 // ---------------------------------------------------------------------------
 
@@ -593,7 +624,7 @@ httpServer.listen(PORT, () => {
   logInfo(`PokerCrawl v${VERSION} started`, {
     port:   PORT,
     env:    IS_PROD ? "production" : "development",
-    tables: PRESET_TABLES.length,
+    tables: CASH_TABLES.length,
   });
   logDebug(`  → HTTP:        http://localhost:${PORT}`);
   logDebug(`  → WS (UI):     ws://localhost:${PORT}/ws-ui`);
@@ -615,35 +646,77 @@ interface PresetTable {
   bots:           string[];
 }
 
-const PRESET_TABLES: PresetTable[] = [
-  {
-    id:             "beginners",
-    name:           "Beginners",
-    smallBlind:     5,
-    bigBlind:       10,
-    maxPlayers:     6,
-    startingTokens: 500,
-    bots:           ["wolf", "owl", "turtle", "fox"],
-  },
-  {
-    id:             "shark-tank",
-    name:           "Shark Tank",
-    smallBlind:     25,
-    bigBlind:       50,
-    maxPlayers:     9,
-    startingTokens: 1_000,
-    bots:           ["shark", "rock", "mago", "caos"],
-  },
-  {
-    id:             "high-rollers",
-    name:           "High Rollers",
-    smallBlind:     100,
-    bigBlind:       200,
-    maxPlayers:     4,
-    startingTokens: 5_000,
-    bots:           [],
-  },
+const CASH_TABLES: PresetTable[] = [
+  { id: "micro",     name: "Micro Stakes", smallBlind: 1,   bigBlind: 2,   maxPlayers: 6, startingTokens: 200,    bots: [] },
+  { id: "low",       name: "Low Stakes",   smallBlind: 5,   bigBlind: 10,  maxPlayers: 6, startingTokens: 500,    bots: ["wolf", "owl", "turtle", "fox"] },
+  { id: "mid",       name: "Mid Stakes",   smallBlind: 25,  bigBlind: 50,  maxPlayers: 9, startingTokens: 2_000,  bots: ["shark", "rock", "mago", "caos"] },
+  { id: "high",      name: "High Stakes",  smallBlind: 50,  bigBlind: 100, maxPlayers: 9, startingTokens: 4_000,  bots: [] },
+  { id: "nosebleed", name: "Nosebleed",    smallBlind: 100, bigBlind: 200, maxPlayers: 4, startingTokens: 10_000, bots: [] },
+  { id: "heads-up",  name: "Heads Up",     smallBlind: 10,  bigBlind: 20,  maxPlayers: 2, startingTokens: 1_000,  bots: [] },
 ];
+
+// ---------------------------------------------------------------------------
+// Sit & Go configuration
+// ---------------------------------------------------------------------------
+
+interface SngEntry {
+  id:         string;
+  name:       string;
+  buyIn:      number;
+  maxPlayers: number;
+  prizePool:  number;
+  speed:      string;
+}
+
+const SNG_LIST: SngEntry[] = [
+  { id: "sng-turbo-6",  name: "Turbo 6-Max",  buyIn: 10, maxPlayers: 6, prizePool: 50,  speed: "Turbo"   },
+  { id: "sng-hyper-9",  name: "Hyper 9-Max",  buyIn: 25, maxPlayers: 9, prizePool: 180, speed: "Hyper"   },
+  { id: "sng-hu",       name: "Heads Up SNG", buyIn: 50, maxPlayers: 2, prizePool: 90,  speed: "Regular" },
+  { id: "sng-knockout", name: "Knockout SNG", buyIn: 20, maxPlayers: 9, prizePool: 140, speed: "Turbo"   },
+];
+
+// Mutable registered-player counts (incremented when agents join an SNG)
+const sngRegistered = new Map<string, number>(SNG_LIST.map((s) => [s.id, 0]));
+
+// ---------------------------------------------------------------------------
+// MTT configuration
+// ---------------------------------------------------------------------------
+
+interface MttEntry {
+  id:              string;
+  name:            string;
+  buyIn:           number;
+  scheduleMs:      number;  // repeat period in ms; 0 = weekly
+  scheduleLabel:   string;
+  prizeMultiplier: number;  // prizePool = buyIn × prizeMultiplier × registrations (min 10)
+  fixedPrize?:     number;  // override for freerolls
+  format:          string;
+  speed:           string;
+}
+
+const MTT_LIST: MttEntry[] = [
+  { id: "mtt-daily",    name: "Daily Grind",       buyIn: 10, scheduleMs: 2 * 3_600_000, scheduleLabel: "Every 2h",   prizeMultiplier: 10, format: "Regular",  speed: "Regular" },
+  { id: "mtt-weekly",   name: "PokerCrawl Weekly", buyIn: 50, scheduleMs: 0,             scheduleLabel: "Sundays 20h",prizeMultiplier: 50, format: "Regular",  speed: "Regular" },
+  { id: "mtt-bounty",   name: "Bounty Hunter",     buyIn: 25, scheduleMs: 4 * 3_600_000, scheduleLabel: "Every 4h",   prizeMultiplier: 20, format: "Knockout", speed: "Turbo"   },
+  { id: "mtt-freeroll", name: "Freeroll",           buyIn: 0,  scheduleMs: 24 * 3_600_000,scheduleLabel: "Daily",      prizeMultiplier: 0,  fixedPrize: 1_000, format: "Regular",  speed: "Regular" },
+];
+
+const mttRegistered = new Map<string, number>(MTT_LIST.map((m) => [m.id, 0]));
+
+/** ms until next scheduled start for an MTT */
+function nextMttStartMs(m: MttEntry): number {
+  if (m.id === "mtt-weekly") {
+    const d = new Date();
+    const daysUntilSunday = (7 - d.getUTCDay()) % 7 || 7;
+    const next = new Date(d);
+    next.setUTCDate(d.getUTCDate() + daysUntilSunday);
+    next.setUTCHours(20, 0, 0, 0);
+    return next.getTime() - Date.now();
+  }
+  if (m.scheduleMs === 0) return 3_600_000;
+  const now = Date.now();
+  return m.scheduleMs - (now % m.scheduleMs);
+}
 
 type BotClass = new (opts: { id: string; tableId: string }) => BaseAgent;
 
@@ -755,8 +828,8 @@ function setupOrchHandlers(orch: AgentOrchestrator, store: GameStore, tableId: s
 function createOverflowTable(baseTableId: string): string | undefined {
   // Find the base preset (or the base of an existing overflow like "beginners-2")
   const baseConfig =
-    PRESET_TABLES.find((c) => c.id === baseTableId) ??
-    PRESET_TABLES.find((c) => baseTableId.startsWith(c.id));
+    CASH_TABLES.find((c) => c.id === baseTableId) ??
+    CASH_TABLES.find((c) => baseTableId.startsWith(c.id));
   if (!baseConfig) {
     logWarn("createOverflowTable: unknown base table", { baseTableId });
     return undefined;
@@ -881,7 +954,7 @@ logInfo("[DB] Supabase startup check", {
 // Persist preset tables and bot agents to Supabase on startup
 if (isDbAvailable()) {
   logInfo("[DB] Connection available — persisting preset tables and bot agents");
-  for (const cfg of PRESET_TABLES) {
+  for (const cfg of CASH_TABLES) {
     void saveBotTable(cfg.id, cfg.name, cfg.smallBlind, cfg.bigBlind, cfg.maxPlayers);
   }
   for (const [botId, r] of eloMap) {
@@ -892,10 +965,10 @@ if (isDbAvailable()) {
 }
 
 logInfo(`Bot game loops starting`, {
-  tables:        PRESET_TABLES.map((t) => t.id),
+  tables:        CASH_TABLES.map((t) => t.id),
   handDelayMs:   HAND_DELAY_MS,
   actionDelayMs: ACTION_DELAY_MS,
 });
 
 // Start all table loops concurrently
-void Promise.all(PRESET_TABLES.map((cfg) => runTableLoop(cfg)));
+void Promise.all(CASH_TABLES.map((cfg) => runTableLoop(cfg)));
