@@ -192,9 +192,22 @@ export class HttpAgentBridge {
     this._sessions.set(sessionId, session);
     this._agentIdx.set(agent.agentId, sessionId);
 
+    // Auto-join: seat agent at the best available bot table on connect.
+    // This eliminates the need for agents to explicitly send join_table.
+    let autoTableId = this._findBestBotTable();
+    if (!autoTableId && this._onTableFull) {
+      // All tables full — create an overflow table from the first registered table
+      const firstTableId = [...this._botTables.keys()][0];
+      if (firstTableId) autoTableId = this._onTableFull(firstTableId);
+    }
+    if (autoTableId) {
+      const entry = this._botTables.get(autoTableId);
+      if (entry) this._crossSeatAndRegister(session, autoTableId, entry);
+    }
+
     console.log(
       `[${new Date().toISOString()}] INFO  [HttpAgentBridge] Agent connected:` +
-      ` ${agent.agentId} (${agent.name}) session=${sessionId}`,
+      ` ${agent.agentId} (${agent.name}) session=${sessionId} table=${session.botTableId ?? "none"}`,
     );
 
     return json(res, 200, {
@@ -202,7 +215,15 @@ export class HttpAgentBridge {
       pollUrl: `/api/agents/poll/${sessionId}`,
       sendUrl: `/api/agents/action/${sessionId}`,
       agentId: agent.agentId,
+      tableId: session.botTableId ?? null,
     });
+  }
+
+  /** Return the name of an HTTP-connected agent, or undefined if not connected. */
+  getAgentName(agentId: string): string | undefined {
+    const sid = this._agentIdx.get(agentId);
+    if (!sid) return undefined;
+    return this._sessions.get(sid)?.agent.name;
   }
 
   /** GET /api/agents/poll/:sessionId — long poll */

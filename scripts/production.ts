@@ -326,16 +326,29 @@ httpApp.get("/api/recent-hands", (_req: Request, res: Response): void => {
 // ---------------------------------------------------------------------------
 
 httpApp.get("/api/tables", (_req: Request, res: Response): void => {
+  // Build a name-lookup map from all sources
+  const wsAgents = agentBridge.listAgents();
+  const nameOf = (agentId: string): string => {
+    const bot = eloMap.get(agentId);
+    if (bot) return bot.name;
+    const ws = wsAgents.find((a) => a.agentId === agentId);
+    if (ws) return ws.name;
+    const http = httpAgentBridge.getAgentName(agentId);
+    if (http) return http;
+    return agentId;
+  };
+
   // Return ALL active tables (presets + overflow) sorted by name
   const tables = Array.from(activeBotTables.entries()).map(([tableId, { store, config }]) => {
     const record = store.getTable(tableId);
-    const seats = record?.state.seats ?? [];
+    const rawSeats = record?.state.seats ?? [];
     const activePot = record?.state.mainPot ?? 0;
     const status = !record
       ? "waiting"
       : record.state.phase === "waiting"
         ? "waiting"
         : "active";
+    const seats = rawSeats.map((s) => ({ agentId: s.agentId, name: nameOf(s.agentId) }));
     return {
       id:         tableId,
       name:       config.name,
@@ -347,6 +360,7 @@ httpApp.get("/api/tables", (_req: Request, res: Response): void => {
       status,
       handNumber: record?.state.handNumber ?? 0,
       type:       "cash",
+      seats,
     };
   });
   tables.sort((a, b) => a.name.localeCompare(b.name));

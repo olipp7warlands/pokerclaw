@@ -20,6 +20,7 @@ interface Props {
 interface ApiCashTable {
   id: string; name: string; smallBlind: number; bigBlind: number;
   maxPlayers: number; players: number; pot: number; status: string;
+  seats?: Array<{ agentId: string; name: string }>;
 }
 
 interface ApiSng {
@@ -268,6 +269,15 @@ function CashRow({ table, index, onJoin, onWatch }: {
       <td className="py-2.5 px-3 text-xs font-mono">
         <span style={{ color: playerColor, fontWeight: 600 }}>{table.players}</span>
         <span className="text-white/22">/{table.maxPlayers}</span>
+        {table.seats && table.seats.length > 0 && (
+          <div className="flex flex-wrap gap-0.5 mt-0.5">
+            {table.seats.map((s) => (
+              <span key={s.agentId} className="text-[9px] font-mono text-white/35 truncate max-w-[60px]" title={s.name}>
+                {s.name}
+              </span>
+            ))}
+          </div>
+        )}
       </td>
       <td className="py-2.5 px-3 text-xs font-mono text-white/45">
         {table.pot > 0 ? formatTokens(table.pot) : <span className="text-white/18">—</span>}
