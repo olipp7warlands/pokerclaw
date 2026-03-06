@@ -3,11 +3,13 @@ import type { ConnectionMode } from "../../hooks/useGameSocket.js";
 import { PhaseIndicator } from "../actions/PhaseIndicator.js";
 
 interface HeaderProps {
-  handNumber?: number;
-  mode?:       ConnectionMode;
-  phase?:      GamePhase;
+  handNumber?:  number;
+  mode?:        ConnectionMode;
+  phase?:       GamePhase;
   onLogoClick?: () => void;
-  right?:      React.ReactNode;
+  onBack?:      () => void;
+  backLabel?:   string;
+  right?:       React.ReactNode;
 }
 
 const MODE_DOT: Record<ConnectionMode, string> = {
@@ -24,9 +26,21 @@ const MODE_TEXT: Record<ConnectionMode, string> = {
   error:      "Disconnected",
 };
 
-export function Header({ handNumber, mode, phase, onLogoClick, right }: HeaderProps) {
+export function Header({ handNumber, mode, phase, onLogoClick, onBack, backLabel, right }: HeaderProps) {
   return (
     <header className="flex items-center justify-between px-6 py-2 border-b border-white/5 bg-void/60 backdrop-blur-sm shrink-0 gap-4">
+      {/* ── Back button (optional, shown in table views) ── */}
+      {onBack && (
+        <button
+          onClick={onBack}
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded border border-white/10
+                     text-white/40 text-[11px] font-mono hover:border-gold/30 hover:text-white/70
+                     transition-colors flex-shrink-0"
+        >
+          ← {backLabel ?? "Back"}
+        </button>
+      )}
+
       {/* ── Logo ── */}
       <button
         onClick={onLogoClick}

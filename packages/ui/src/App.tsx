@@ -18,6 +18,7 @@ import { Leaderboard }    from "./components/dashboard/Leaderboard.js";
 import { HandHistory }    from "./components/dashboard/HandHistory.js";
 import { TokenBankPanel } from "./components/dashboard/TokenBankPanel.js";
 import { DEMO_TABLES }    from "./lib/demo-lobby.js";
+import { formatTokens }   from "./lib/utils.js";
 import type { LobbyTable } from "./lib/demo-lobby.js";
 import { registerAgent, lookupAgent } from "./lib/agent-registry.js";
 import type { AgentConfig } from "./components/lobby/AddAgentModal.js";
@@ -26,6 +27,71 @@ import { LandingPage }     from "./components/landing/LandingPage.js";
 import { LeaderboardPage } from "./components/landing/LeaderboardPage.js";
 import { DocsPage }        from "./components/landing/DocsPage.js";
 import { SpectateView }    from "./components/landing/SpectateView.js";
+
+// ---------------------------------------------------------------------------
+// TableInfoBar — live meta strip shown below the header inside table views
+// ---------------------------------------------------------------------------
+
+interface TableMeta {
+  name:       string;
+  smallBlind: number;
+  bigBlind:   number;
+  maxPlayers: number;
+  players:    number;
+  handNumber: number;
+  pot:        number;
+}
+
+function Dot() {
+  return <span style={{ color: "rgba(255,255,255,0.14)" }}>·</span>;
+}
+
+function TableInfoBar({ meta }: { meta: TableMeta }) {
+  return (
+    <div
+      style={{
+        background:    "rgba(0,0,0,0.55)",
+        borderBottom:  "1px solid rgba(212,175,55,0.1)",
+        padding:       "5px 20px",
+        display:       "flex",
+        alignItems:    "center",
+        gap:           10,
+        fontSize:      11,
+        fontFamily:    "'JetBrains Mono', monospace",
+        flexShrink:    0,
+        flexWrap:      "wrap",
+      }}
+    >
+      <span style={{ color: "#d4af37", fontWeight: 700 }}>🎰 {meta.name}</span>
+      <Dot />
+      <span style={{ color: "rgba(255,255,255,0.45)" }}>
+        NL Hold&apos;em ${meta.smallBlind}/${meta.bigBlind}
+      </span>
+      <Dot />
+      <span style={{ color: "rgba(255,255,255,0.3)" }}>{meta.maxPlayers}-max</span>
+      <Dot />
+      <span style={{ color: "rgba(255,255,255,0.55)" }}>
+        Players:{" "}
+        <span style={{ color: meta.players >= meta.maxPlayers ? "#f87171" : "#4ade80", fontWeight: 700 }}>
+          {meta.players}
+        </span>
+        /{meta.maxPlayers}
+      </span>
+      {meta.pot > 0 && (
+        <>
+          <Dot />
+          <span style={{ color: "rgba(255,255,255,0.4)" }}>
+            Pot: <span style={{ color: "#d4af37" }}>{formatTokens(meta.pot)}</span>
+          </span>
+        </>
+      )}
+      <Dot />
+      <span style={{ color: "rgba(255,255,255,0.3)" }}>
+        Hand <span style={{ color: "rgba(255,255,255,0.55)" }}>#{meta.handNumber}</span>
+      </span>
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Lobby view  —  route "/lobby"
@@ -102,9 +168,9 @@ function TableView({ tables }: { tables: LobbyTable[] }) {
       .catch(() => {});
   }, [connect]);
 
-  // Poll /api/tables/:id/state every 2s as HTTP fallback (catches initial state
-  // before the first WS broadcast arrives, and shows real agent names).
-  const [, setRestSnapshot] = useState<import("./hooks/useGameSocket.js").LiveSnapshot | null>(null);
+  // Poll /api/tables/:id/state every 3s — populates agent name registry and
+  // feeds the TableInfoBar with live player count / pot / hand number.
+  const [tableMeta, setTableMeta] = useState<TableMeta | null>(null);
   useEffect(() => {
     if (!id) return;
     let cancelled = false;
@@ -114,7 +180,10 @@ function TableView({ tables }: { tables: LobbyTable[] }) {
         if (!r.ok || cancelled) return;
         const data = await r.json() as Record<string, unknown> & {
           agentNames?: Record<string, string>;
-          seats?: Array<{ agentId: string; name: string }>;
+          seats?:      Array<{ agentId: string; name: string }>;
+          config?:     { name: string; smallBlind: number; bigBlind: number; maxPlayers: number };
+          handNumber?: number;
+          mainPot?:    number;
         };
         // Register agent names from the state endpoint
         if (data.agentNames) {
@@ -124,11 +193,21 @@ function TableView({ tables }: { tables: LobbyTable[] }) {
             }
           }
         }
-        if (!cancelled) setRestSnapshot(data as unknown as import("./hooks/useGameSocket.js").LiveSnapshot);
+        if (!cancelled && data.config) {
+          setTableMeta({
+            name:       data.config.name,
+            smallBlind: data.config.smallBlind,
+            bigBlind:   data.config.bigBlind,
+            maxPlayers: data.config.maxPlayers,
+            players:    data.seats?.length ?? 0,
+            handNumber: data.handNumber ?? 0,
+            pot:        data.mainPot ?? 0,
+          });
+        }
       } catch { /* ignore — server might not have this table */ }
     };
     void poll();
-    const interval = setInterval(() => { void poll(); }, 2_000);
+    const interval = setInterval(() => { void poll(); }, 3_000);
     return () => { cancelled = true; clearInterval(interval); };
   }, [id]);
   const { gameState, recentActions, demoChat, handHistory, controlRef } = useGameState(
@@ -186,7 +265,12 @@ function TableView({ tables }: { tables: LobbyTable[] }) {
         mode={mode}
         phase={gameState.phase}
         onLogoClick={() => navigate("/lobby")}
+        onBack={() => navigate("/lobby")}
+        backLabel="Lobby"
       />
+
+      {/* ── Live table info strip ── */}
+      {tableMeta && <TableInfoBar meta={tableMeta} />}
 
       {/* ── CSS Grid main layout ─────────────────────────────────────────── */}
       <main

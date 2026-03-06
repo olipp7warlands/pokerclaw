@@ -72,11 +72,11 @@ function BetBadge({
 // Ghost seat — "+" placeholder for vacant positions
 // ---------------------------------------------------------------------------
 
-function GhostSeat({ onClick }: { onClick: () => void }) {
+function GhostSeat({ onClick }: { onClick?: (() => void) | undefined }) {
   return (
     <button
       onClick={onClick}
-      style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}
+      style={{ background: "none", border: "none", cursor: onClick ? "pointer" : "default", padding: 0 }}
       className="flex flex-col items-center gap-1 group select-none"
     >
       <div
@@ -252,7 +252,7 @@ export function PokerTable({
       })}
 
       {/* ── Ghost seats (vacant positions) ── */}
-      {onAddAgent && Array.from({ length: totalPos - N }, (_, k) => {
+      {Array.from({ length: totalPos - N }, (_, k) => {
         const seatIndex = N + k;
         const pos = positions[seatIndex] ?? positions[0]!;
         return (
@@ -266,7 +266,7 @@ export function PokerTable({
               zIndex:    5,
             }}
           >
-            <GhostSeat onClick={() => onAddAgent(seatIndex)} />
+            <GhostSeat onClick={onAddAgent ? () => onAddAgent(seatIndex) : undefined} />
           </div>
         );
       })}
