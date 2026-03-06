@@ -840,15 +840,32 @@ async function runTableLoop(cfg: PresetTable): Promise<void> {
 agentBridge.setOnTableFull(createOverflowTable);
 httpAgentBridge.setOnTableFull(createOverflowTable);
 
+// ---------------------------------------------------------------------------
+// Supabase diagnostics — always log at startup so Railway logs show status
+// ---------------------------------------------------------------------------
+
+logInfo("[DB] Supabase startup check", {
+  SUPABASE_URL:      process.env["SUPABASE_URL"]      ? `SET (len=${process.env["SUPABASE_URL"].length})`      : "MISSING",
+  SUPABASE_ANON_KEY: process.env["SUPABASE_ANON_KEY"] ? `SET (len=${process.env["SUPABASE_ANON_KEY"].length})` : "MISSING",
+});
+
 // Persist preset tables and bot agents to Supabase on startup
 if (isDbAvailable()) {
+  logInfo("[DB] Connection available — persisting preset tables and bot agents");
   for (const cfg of PRESET_TABLES) {
     void saveBotTable(cfg.id, cfg.name, cfg.smallBlind, cfg.bigBlind, cfg.maxPlayers);
   }
   for (const [botId, r] of eloMap) {
     void saveAgent(botId, r.name, r.emoji, [], "simulated");
   }
-  logInfo("DB: persisted preset tables and bot agents to Supabase");
+  // Test: try to write a hands increment to confirm write access works
+  void incrementGlobalHands(0).then(() => {
+    logInfo("[DB] Test write (incrementGlobalHands(0)) completed — check logs above for errors");
+  }).catch((err) => {
+    logError("[DB] Test write FAILED", { error: String(err) });
+  });
+} else {
+  logWarn("[DB] Supabase NOT available — all DB writes will be skipped");
 }
 
 logInfo(`Bot game loops starting`, {
