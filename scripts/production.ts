@@ -146,15 +146,33 @@ interface BotRecord {
 }
 
 const eloMap = new Map<string, BotRecord>([
-  ["reloj",  { name: "El Reloj",   emoji: "⏱️", wins: 0, hands: 0, elo: 1485 }],
-  ["shark",  { name: "El Tiburón", emoji: "🦈", wins: 0, hands: 0, elo: 1380 }],
-  ["mago",   { name: "El Mago",    emoji: "🎩", wins: 0, hands: 0, elo: 1290 }],
-  ["wolf",   { name: "El Lobo",    emoji: "🐺", wins: 0, hands: 0, elo: 1260 }],
-  ["rock",   { name: "La Roca",    emoji: "🪨", wins: 0, hands: 0, elo: 1240 }],
-  ["owl",    { name: "La Lechuza", emoji: "🦉", wins: 0, hands: 0, elo: 1220 }],
-  ["caos",   { name: "El Caos",    emoji: "🎲", wins: 0, hands: 0, elo: 1180 }],
-  ["fox",    { name: "El Zorro",   emoji: "🦊", wins: 0, hands: 0, elo: 1150 }],
-  ["turtle", { name: "La Tortuga", emoji: "🐢", wins: 0, hands: 0, elo: 1100 }],
+  // Named personality bots (appear in leaderboard)
+  ["reloj",  { name: "El Reloj",     emoji: "⏱️", wins: 0, hands: 0, elo: 1485 }],
+  ["shark",  { name: "El Tiburón",   emoji: "🦈", wins: 0, hands: 0, elo: 1380 }],
+  ["mago",   { name: "El Mago",      emoji: "🎩", wins: 0, hands: 0, elo: 1290 }],
+  ["wolf",   { name: "El Lobo",      emoji: "🐺", wins: 0, hands: 0, elo: 1260 }],
+  ["rock",   { name: "La Roca",      emoji: "🪨", wins: 0, hands: 0, elo: 1240 }],
+  ["owl",    { name: "La Lechuza",   emoji: "🦉", wins: 0, hands: 0, elo: 1220 }],
+  ["caos",   { name: "El Caos",      emoji: "🎲", wins: 0, hands: 0, elo: 1180 }],
+  ["fox",    { name: "El Zorro",     emoji: "🦊", wins: 0, hands: 0, elo: 1150 }],
+  ["turtle", { name: "La Tortuga",   emoji: "🐢", wins: 0, hands: 0, elo: 1100 }],
+  // Fill bots — named so they display properly in the lobby
+  ["r1",  { name: "La Mamba",   emoji: "🐍", wins: 0, hands: 0, elo: 1200 }],
+  ["r2",  { name: "El Fantasma",emoji: "👻", wins: 0, hands: 0, elo: 1190 }],
+  ["r3",  { name: "La Piedra",  emoji: "💎", wins: 0, hands: 0, elo: 1180 }],
+  ["r4",  { name: "El Doctor",  emoji: "🎯", wins: 0, hands: 0, elo: 1170 }],
+  ["r5",  { name: "La Suerte",  emoji: "🍀", wins: 0, hands: 0, elo: 1160 }],
+  ["r6",  { name: "El Toro",    emoji: "🐂", wins: 0, hands: 0, elo: 1150 }],
+  ["r7",  { name: "El Sabio",   emoji: "🧙", wins: 0, hands: 0, elo: 1140 }],
+  ["r8",  { name: "El Diablo",  emoji: "😈", wins: 0, hands: 0, elo: 1130 }],
+  ["r9",  { name: "La Reina",   emoji: "👑", wins: 0, hands: 0, elo: 1120 }],
+  ["r10", { name: "El Cobra",   emoji: "🐍", wins: 0, hands: 0, elo: 1110 }],
+  ["r11", { name: "El Hielo",   emoji: "🧊", wins: 0, hands: 0, elo: 1100 }],
+  ["r12", { name: "El Brujo",   emoji: "🔮", wins: 0, hands: 0, elo: 1090 }],
+  ["r13", { name: "La Máquina", emoji: "⚙️", wins: 0, hands: 0, elo: 1080 }],
+  ["r14", { name: "El Rayo",    emoji: "⚡", wins: 0, hands: 0, elo: 1070 }],
+  ["r15", { name: "La Bruja",   emoji: "🧹", wins: 0, hands: 0, elo: 1060 }],
+  ["r16", { name: "El Duelo",   emoji: "⚔️", wins: 0, hands: 0, elo: 1050 }],
 ]);
 
 interface ActivityEvent {
@@ -350,17 +368,17 @@ httpApp.get("/api/tables", (_req: Request, res: Response): void => {
 
   // Return ALL active tables (presets + overflow) sorted by name
   const tables = Array.from(activeBotTables.entries()).map(([tableId, { store, config }]) => {
-    const record = store.getTable(tableId);
-    const rawSeats = record?.state.seats ?? [];
+    const record    = store.getTable(tableId);
     const activePot = record?.state.mainPot ?? 0;
-    const status = !record
-      ? "waiting"
-      : record.state.phase === "waiting"
-        ? "waiting"
-        : "active";
-    const seats = rawSeats.map((s) => ({ agentId: s.agentId, name: nameOf(s.agentId) }));
-    // Count how many waiting agents would prefer this table (estimate by stakes match)
-    const waitingForThisStake = cashWaitingList.length > 0
+    const status    = !record || record.state.phase === "waiting" ? "waiting" : "active";
+
+    // Use agents Map as single source of truth — it reflects actual active players
+    // (record.state.seats also holds zero-stack removed seats, so never use seats.length)
+    const agentIds = record ? [...record.agents.keys()] : [];
+    const players  = agentIds.length; // authoritative count, never exceeds maxPlayers
+    const seats    = agentIds.map((id) => ({ agentId: id, name: nameOf(id) }));
+
+    const waiting  = cashWaitingList.length > 0
       ? Math.ceil(cashWaitingList.length / Math.max(activeBotTables.size, 1))
       : 0;
     return {
@@ -369,13 +387,13 @@ httpApp.get("/api/tables", (_req: Request, res: Response): void => {
       smallBlind: config.smallBlind,
       bigBlind:   config.bigBlind,
       maxPlayers: config.maxPlayers,
-      players:    seats.length,
+      players,
       pot:        activePot,
       status,
       handNumber: record?.state.handNumber ?? 0,
       type:       "cash",
       seats,
-      waiting:    status !== "waiting" ? 0 : waitingForThisStake,
+      waiting,
     };
   });
   tables.sort((a, b) => a.name.localeCompare(b.name));
@@ -525,13 +543,30 @@ httpApp.get("/api/tournaments", (_req: Request, res: Response): void => {
 
 httpApp.get("/api/sng", (_req: Request, res: Response): void => {
   res.json(SNG_LIST.map((s) => {
-    const registered = sngRegistrants.get(s.id)?.length ?? 0;
-    const running    = sngRunning.get(s.id) ?? false;
-    return {
-      ...s,
-      registered,
-      status: running ? "running" : registered >= s.maxPlayers ? "starting" : "registering",
-    };
+    const running = sngRunning.get(s.id) ?? false;
+
+    let registered: number;
+    let status: string;
+
+    if (running) {
+      // Count live players directly from the active game store
+      const active = sngActiveStore.get(s.id);
+      if (active) {
+        const record = active.store.getTable(active.tableId);
+        // Players still in the game (chips > 0)
+        registered = record
+          ? record.state.seats.filter((seat) => seat.stack > 0).length
+          : 0;
+      } else {
+        registered = 0;
+      }
+      status = "running";
+    } else {
+      registered = sngRegistrants.get(s.id)?.length ?? 0;
+      status     = registered >= s.maxPlayers ? "starting" : "registering";
+    }
+
+    return { ...s, registered, status };
   }));
 });
 
@@ -784,9 +819,11 @@ const SNG_LIST: SngEntry[] = [
 ];
 
 /** SNG registrant lists — agentId arrays per SNG (replaces simple count map). */
-const sngRegistrants = new Map<string, string[]>(SNG_LIST.map((s) => [s.id, []]));
+const sngRegistrants  = new Map<string, string[]>(SNG_LIST.map((s) => [s.id, []]));
 /** Whether a given SNG game is currently running. */
-const sngRunning     = new Map<string, boolean>(SNG_LIST.map((s) => [s.id, false]));
+const sngRunning      = new Map<string, boolean>(SNG_LIST.map((s) => [s.id, false]));
+/** Active game store per running SNG — used to get live player count. */
+const sngActiveStore  = new Map<string, { store: GameStore; tableId: string }>();
 
 /** Start a SNG game with its registered agents. Resets registration when done. */
 async function startSngGame(sngId: string): Promise<void> {
@@ -819,6 +856,9 @@ async function startSngGame(sngId: string): Promise<void> {
 
   setupOrchHandlers(orch, store, tableId, sng.name);
 
+  // Track the active store so /api/sng can report live player count
+  sngActiveStore.set(sngId, { store, tableId });
+
   logInfo(`SNG starting`, { sngId, table: tableId, players: registrants.length });
   try {
     await orch.playTournament(9_999, {
@@ -829,9 +869,9 @@ async function startSngGame(sngId: string): Promise<void> {
   } catch (err) {
     logError("SNG error", { sngId, error: String(err) });
   } finally {
+    sngActiveStore.delete(sngId);
     sngRunning.set(sngId, false);
     logInfo(`SNG complete — new registration open`, { sngId });
-    // Kick off next SNG round immediately if bots are waiting
     void scheduleSngRefill(sngId);
   }
 }
@@ -902,10 +942,23 @@ const BOT_CLASS_MAP: Record<string, BotClass> = {
   owl:    OwlBot,
   turtle: TurtleBot,
   fox:    FoxBot,
-  // Fill bots — RandomBot instances to populate tables and make games run
-  ...Object.fromEntries(
-    Array.from({ length: 40 }, (_, i) => [`r${i + 1}`, RandomBot] as [string, BotClass])
-  ),
+  // Fill bots — varied personalities so tables play differently
+  r1:  AggressiveBot,
+  r2:  BlufferBot,
+  r3:  ConservativeBot,
+  r4:  CalculatedBot,
+  r5:  RandomBot,
+  r6:  AggressiveBot,
+  r7:  ConservativeBot,
+  r8:  BlufferBot,
+  r9:  CalculatedBot,
+  r10: AggressiveBot,
+  r11: ConservativeBot,
+  r12: BlufferBot,
+  r13: CalculatedBot,
+  r14: AggressiveBot,
+  r15: RandomBot,
+  r16: RandomBot,
 };
 
 /** Active bot table entries — used by GET /api/tables and /api/stats. */
