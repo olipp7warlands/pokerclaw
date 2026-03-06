@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { DEMO_LEADERBOARD, type LobbyTable } from "../../lib/demo-lobby.js";
 import { LeaderboardPanel } from "./LeaderboardPanel.js";
@@ -309,7 +310,7 @@ function CashRow({ table, index, onJoin, onWatch }: {
             onClick={(e) => { e.stopPropagation(); onWatch?.(table.id); }}
             className="px-2.5 py-0.5 text-[10px] font-mono font-bold rounded"
             style={{ border: "1.5px solid rgba(212,175,55,0.3)", color: "rgba(212,175,55,0.6)" }}
-          >WATCH LIVE</motion.button>
+          >WATCH</motion.button>
         </span>
       </td>
     </motion.tr>
@@ -336,6 +337,7 @@ function SngSection({ entries }: { entries: ApiSng[] }) {
 }
 
 function SngRow({ entry, index }: { entry: ApiSng; index: number }) {
+  const navigate  = useNavigate();
   const pct       = entry.maxPlayers > 0 ? entry.registered / entry.maxPlayers : 0;
   const fillColor = pct >= 1 ? "#4ade80" : pct >= 0.5 ? "#fbbf24" : "#d4af37";
   const isRunning = entry.status === "running";
@@ -381,10 +383,11 @@ function SngRow({ entry, index }: { entry: ApiSng; index: number }) {
       <td className="py-2.5 px-3 text-right">
         <motion.button
           whileHover={{ scale: 1.06 }} whileTap={{ scale: 0.94 }}
+          onClick={() => isRunning ? navigate(`/spectate/${entry.id}`) : undefined}
           className="px-2.5 py-0.5 text-[10px] font-mono font-bold rounded"
-          style={{ background: "rgba(99,102,241,0.1)", border: "1.5px solid rgba(99,102,241,0.4)", color: "#818cf8" }}
+          style={{ background: "rgba(99,102,241,0.1)", border: "1.5px solid rgba(99,102,241,0.4)", color: "#818cf8", cursor: isRunning ? "pointer" : "default" }}
         >
-          {isRunning ? "WATCH LIVE" : "OPEN REG"}
+          {isRunning ? "WATCH" : "REGISTER"}
         </motion.button>
       </td>
     </motion.tr>
@@ -442,7 +445,7 @@ function MttRow({ entry, index }: { entry: ApiMtt; index: number }) {
           className="px-2.5 py-0.5 text-[10px] font-mono font-bold rounded"
           style={{ background: "rgba(212,175,55,0.08)", border: "1.5px solid rgba(212,175,55,0.3)", color: "#d4af37" }}
         >
-          OPEN REG
+          REGISTER
         </motion.button>
       </td>
     </motion.tr>

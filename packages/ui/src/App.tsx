@@ -10,7 +10,8 @@ import { Layout }         from "./components/layout/Layout.js";
 import { Header }         from "./components/layout/Header.js";
 import { Sidebar }        from "./components/layout/Sidebar.js";
 import { LobbyScreen }    from "./components/lobby/LobbyScreen.js";
-import { AddAgentModal }  from "./components/lobby/AddAgentModal.js";
+import { AddAgentModal }   from "./components/lobby/AddAgentModal.js";
+import { JoinTableModal }  from "./components/lobby/JoinTableModal.js";
 import { PokerTable }     from "./components/table/PokerTable.js";
 import { GameControls }   from "./components/controls/GameControls.js";
 import { ActionTimeline } from "./components/actions/ActionTimeline.js";
@@ -172,8 +173,15 @@ function TableView({ tables }: { tables: LobbyTable[] }) {
   // tableMeta comes from polling; null in demo mode
   const tableMeta: TableMeta | null = meta ?? null;
 
-  // AddAgent modal state
-  const [addModalOpen, setAddModalOpen] = useState(false);
+  // Modal state — JoinTableModal for live mode, AddAgentModal for demo
+  const [addModalOpen,  setAddModalOpen]  = useState(false);
+  const [joinModalOpen, setJoinModalOpen] = useState(false);
+
+  // Route the ghost-seat/join click to the right modal
+  const handleOpenJoin = useCallback(() => {
+    if (isConnected) setJoinModalOpen(true);
+    else             setAddModalOpen(true);
+  }, [isConnected]);
 
   // Chat: demo mode produces demoChat; live polling has no chat channel
   const allChat = demoChat;
@@ -250,7 +258,7 @@ function TableView({ tables }: { tables: LobbyTable[] }) {
             recentActions={recentActions}
             demoChat={demoChat}
             maxSeats={maxSeats}
-            onAddAgent={() => setAddModalOpen(true)}
+            onAddAgent={handleOpenJoin}
             onKickAgent={handleKick}
             onRebuyAgent={handleRebuy}
           />
@@ -318,14 +326,25 @@ function TableView({ tables }: { tables: LobbyTable[] }) {
       {/* Fixed chat overlay */}
       <FixedChat messages={allChat} />
 
-      {/* Add Agent Modal */}
-      <AddAgentModal
-        isOpen={addModalOpen}
-        onClose={() => setAddModalOpen(false)}
-        onAdd={handleAddAgent}
-        currentSeats={gameState.seats.length}
-        maxSeats={maxSeats}
-      />
+      {/* Demo mode: full bot-config modal */}
+      {!isConnected && (
+        <AddAgentModal
+          isOpen={addModalOpen}
+          onClose={() => setAddModalOpen(false)}
+          onAdd={handleAddAgent}
+          currentSeats={gameState.seats.length}
+          maxSeats={maxSeats}
+        />
+      )}
+
+      {/* Live mode: simple name prompt → register + connect via API */}
+      {isConnected && (
+        <JoinTableModal
+          isOpen={joinModalOpen}
+          tableId={id}
+          onClose={() => setJoinModalOpen(false)}
+        />
+      )}
     </Layout>
   );
 }
