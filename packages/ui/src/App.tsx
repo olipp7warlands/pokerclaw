@@ -1,9 +1,10 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback } from "react";
 import { Routes, Route, Navigate, useNavigate, useParams } from "react-router-dom";
 
-import { useAnimations } from "./hooks/useAnimations.js";
-import { useGameSocket } from "./hooks/useGameSocket.js";
-import { useGameState }  from "./hooks/useGameState.js";
+import { useAnimations }    from "./hooks/useAnimations.js";
+import { useGameState }     from "./hooks/useGameState.js";
+import { useTablePolling }  from "./hooks/useTablePolling.js";
+import type { ConnectionMode } from "./hooks/useGameSocket.js";
 
 import { Layout }         from "./components/layout/Layout.js";
 import { Header }         from "./components/layout/Header.js";
@@ -20,7 +21,7 @@ import { TokenBankPanel } from "./components/dashboard/TokenBankPanel.js";
 import { DEMO_TABLES }    from "./lib/demo-lobby.js";
 import { formatTokens }   from "./lib/utils.js";
 import type { LobbyTable } from "./lib/demo-lobby.js";
-import { registerAgent, lookupAgent } from "./lib/agent-registry.js";
+import { registerAgent } from "./lib/agent-registry.js";
 import type { AgentConfig } from "./components/lobby/AddAgentModal.js";
 
 import { LandingPage }     from "./components/landing/LandingPage.js";
@@ -150,82 +151,32 @@ function TableView({ tables }: { tables: LobbyTable[] }) {
   const maxSeats    = tableConfig?.maxSeats      ?? 9;
 
   const { speed, setSpeed, isPlaying, setIsPlaying } = useAnimations();
-  const { mode, liveSnapshot, chatMessages, toggleMode, connect } = useGameSocket(undefined, id);
 
-  // Auto-connect to live server and populate agent name registry
-  useEffect(() => {
-    connect();
-    // Fetch registered external agents and add them to the local display registry
-    fetch("/api/agents")
-      .then((r) => (r.ok ? r.json() : []))
-      .then((agents: Array<{ agentId: string; name: string; type: string }>) => {
-        for (const a of agents) {
-          if (!lookupAgent(a.agentId)) {
-            registerAgent({ id: a.agentId, name: a.name, nickname: a.name, emoji: "🤖", type: "bot", color: "#d4af37", style: "External" });
-          }
-        }
-      })
-      .catch(() => {});
-  }, [connect]);
+  // Live data via REST polling (replaces WebSocket — WS unreliable on Railway)
+  const { gameState: pollState, meta, isConnected } = useTablePolling(id);
 
-  // Poll /api/tables/:id/state every 3s — populates agent name registry and
-  // feeds the TableInfoBar with live player count / pot / hand number.
-  const [tableMeta, setTableMeta] = useState<TableMeta | null>(null);
-  useEffect(() => {
-    if (!id) return;
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const r = await fetch(`/api/tables/${id}/state`);
-        if (!r.ok || cancelled) return;
-        const data = await r.json() as Record<string, unknown> & {
-          agentNames?: Record<string, string>;
-          seats?:      Array<{ agentId: string; name: string }>;
-          config?:     { name: string; smallBlind: number; bigBlind: number; maxPlayers: number };
-          handNumber?: number;
-          mainPot?:    number;
-        };
-        // Register agent names from the state endpoint
-        if (data.agentNames) {
-          for (const [agentId, name] of Object.entries(data.agentNames)) {
-            if (!lookupAgent(agentId)) {
-              registerAgent({ id: agentId, name: name as string, nickname: name as string, emoji: "🤖", type: "bot", color: "#d4af37", style: "Server" });
-            }
-          }
-        }
-        if (!cancelled && data.config) {
-          setTableMeta({
-            name:       data.config.name,
-            smallBlind: data.config.smallBlind,
-            bigBlind:   data.config.bigBlind,
-            maxPlayers: data.config.maxPlayers,
-            players:    data.seats?.length ?? 0,
-            handNumber: data.handNumber ?? 0,
-            pot:        data.mainPot ?? 0,
-          });
-        }
-      } catch { /* ignore — server might not have this table */ }
-    };
-    void poll();
-    const interval = setInterval(() => { void poll(); }, 3_000);
-    return () => { cancelled = true; clearInterval(interval); };
-  }, [id]);
-  const { gameState, recentActions, demoChat, handHistory, controlRef } = useGameState(
-    liveSnapshot,
-    mode === "connected",
-    isPlaying,
+  // Demo fallback — runs local mock game only when server is unreachable
+  const { gameState: demoState, recentActions, demoChat, handHistory, controlRef } = useGameState(
+    null,
+    false,
+    isPlaying && !isConnected,
     speed,
     smallBlind,
     bigBlind,
     botCount,
   );
 
+  const gameState: import("@pokercrawl/engine").GameState = isConnected ? pollState : demoState;
+  const mode: ConnectionMode = isConnected ? "connected" : "demo";
+
+  // tableMeta comes from polling; null in demo mode
+  const tableMeta: TableMeta | null = meta ?? null;
+
   // AddAgent modal state
   const [addModalOpen, setAddModalOpen] = useState(false);
 
-  const allChat = mode === "connected"
-    ? chatMessages.map((m) => ({ agentId: m.agentId, message: m.message, timestamp: m.timestamp }))
-    : demoChat;
+  // Chat: demo mode produces demoChat; live polling has no chat channel
+  const allChat = demoChat;
 
   // ── Agent management ────────────────────────────────────────────────────
 
@@ -322,7 +273,7 @@ function TableView({ tables }: { tables: LobbyTable[] }) {
             mode={mode}
             onTogglePlay={() => setIsPlaying((v) => !v)}
             onSpeedChange={setSpeed}
-            onToggleMode={toggleMode}
+            onToggleMode={() => { /* mode auto-detected via polling */ }}
           />
         </div>
 
