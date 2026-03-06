@@ -406,55 +406,81 @@ httpApp.get("/api/tables", (_req: Request, res: Response): void => {
 
 httpApp.get("/api/tables/:id/state", (req: Request, res: Response): void => {
   const tableId = req.params["id"]!;
-  const entry   = activeBotTables.get(tableId);
-  if (!entry) { res.status(404).json({ error: "Table not found" }); return; }
 
-  const record = entry.store.getTable(tableId);
-  if (!record)  { res.status(404).json({ error: "Table not found" }); return; }
+  // Helper: serialise a store record into the standard response shape
+  const serializeRecord = (
+    store: GameStore,
+    actualTableId: string,
+    configName: string,
+    configSmallBlind: number,
+    configBigBlind: number,
+    configMaxPlayers: number,
+  ): void => {
+    const record = store.getTable(actualTableId);
+    if (!record) { res.status(404).json({ error: "Table not found" }); return; }
 
-  const { state } = record;
+    const { state } = record;
+    const agentNames: Record<string, string> = {};
+    for (const agentId of record.agents.keys()) agentNames[agentId] = agentId;
+    for (const a of agentBridge.listAgents()) agentNames[a.agentId] = a.name;
 
-  // Build agentId → display-name map so the UI can show real names
-  const agentNames: Record<string, string> = {};
-  for (const agentId of record.agents.keys()) agentNames[agentId] = agentId;
-  for (const a of agentBridge.listAgents()) agentNames[a.agentId] = a.name;
+    const mapCard = (c: { rank: string; suit: string; value: number }) =>
+      ({ rank: c.rank, suit: c.suit, value: c.value });
 
-  const mapCard = (c: { rank: string; suit: string; value: number }) =>
-    ({ rank: c.rank, suit: c.suit, value: c.value });
+    res.json({
+      tableId: actualTableId,
+      phase:           state.phase,
+      handNumber:      state.handNumber,
+      mainPot:         state.mainPot,
+      sidePots:        state.sidePots.map((sp) => ({ amount: sp.amount, eligibleAgents: [...sp.eligibleAgents] })),
+      currentBet:      state.currentBet,
+      lastRaiseAmount: state.lastRaiseAmount,
+      dealerIndex:     state.dealerIndex,
+      actionOnIndex:   state.actionOnIndex,
+      seats:           state.seats.map((s) => ({
+        agentId:           s.agentId,
+        name:              agentNames[s.agentId] ?? s.agentId,
+        stack:             s.stack,
+        currentBet:        s.currentBet,
+        totalBet:          s.totalBet,
+        status:            s.status,
+        hasActedThisRound: s.hasActedThisRound,
+      })),
+      board: {
+        flop:  state.board.flop.map(mapCard),
+        turn:  state.board.turn  ? mapCard(state.board.turn)  : null,
+        river: state.board.river ? mapCard(state.board.river) : null,
+      },
+      winners:    state.winners.map((w) => ({ agentId: w.agentId, amountWon: w.amountWon })),
+      agentNames,
+      config: {
+        smallBlind: configSmallBlind,
+        bigBlind:   configBigBlind,
+        maxPlayers: configMaxPlayers,
+        name:       configName,
+      },
+    });
+  };
 
-  res.json({
-    tableId,
-    phase:           state.phase,
-    handNumber:      state.handNumber,
-    mainPot:         state.mainPot,
-    sidePots:        state.sidePots.map((sp) => ({ amount: sp.amount, eligibleAgents: [...sp.eligibleAgents] })),
-    currentBet:      state.currentBet,
-    lastRaiseAmount: state.lastRaiseAmount,
-    dealerIndex:     state.dealerIndex,
-    actionOnIndex:   state.actionOnIndex,
-    seats:           state.seats.map((s) => ({
-      agentId:           s.agentId,
-      name:              agentNames[s.agentId] ?? s.agentId,
-      stack:             s.stack,
-      currentBet:        s.currentBet,
-      totalBet:          s.totalBet,
-      status:            s.status,
-      hasActedThisRound: s.hasActedThisRound,
-    })),
-    board: {
-      flop:  state.board.flop.map(mapCard),
-      turn:  state.board.turn  ? mapCard(state.board.turn)  : null,
-      river: state.board.river ? mapCard(state.board.river) : null,
-    },
-    winners:    state.winners.map((w) => ({ agentId: w.agentId, amountWon: w.amountWon })),
-    agentNames,
-    config: {
-      smallBlind: record.config.smallBlind,
-      bigBlind:   record.config.bigBlind,
-      maxPlayers: record.config.maxPlayers,
-      name:       entry.config.name,
-    },
-  });
+  // Cash table lookup
+  const entry = activeBotTables.get(tableId);
+  if (entry) {
+    serializeRecord(entry.store, tableId, entry.config.name, entry.config.smallBlind, entry.config.bigBlind, entry.config.maxPlayers);
+    return;
+  }
+
+  // SNG lookup — tableId may be the sngId or the actual game tableId (sngId-timestamp)
+  const sngId  = tableId.startsWith("sng-") ? tableId.split("-").slice(0, 3).join("-") : null;
+  const active = sngId ? sngActiveStore.get(sngId) : null;
+  if (active) {
+    const sng = SNG_LIST.find((s) => s.id === sngId)!;
+    const sb  = Math.max(1, Math.floor(sng.buyIn / 10));
+    const bb  = Math.max(2, Math.floor(sng.buyIn / 5));
+    serializeRecord(active.store, active.tableId, sng.name, sb, bb, sng.maxPlayers);
+    return;
+  }
+
+  res.status(404).json({ error: "Table not found" });
 });
 
 // ---------------------------------------------------------------------------

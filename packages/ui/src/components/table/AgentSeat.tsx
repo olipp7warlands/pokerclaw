@@ -248,7 +248,7 @@ export function AgentSeat({
     <>
       <motion.div
         initial={{ opacity: 0 }}
-        animate={{ opacity: isEliminated ? 0.22 : isFolded ? 0.42 : 1 }}
+        animate={{ opacity: isEliminated ? 0.5 : isFolded ? 0.42 : 1 }}
         transition={{ opacity: { duration: 0.3 } }}
         className="flex flex-col items-center gap-0.5 select-none"
         onContextMenu={handleContextMenu}

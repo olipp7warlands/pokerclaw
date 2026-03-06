@@ -309,7 +309,7 @@ function CashRow({ table, index, onJoin, onWatch }: {
             onClick={(e) => { e.stopPropagation(); onWatch?.(table.id); }}
             className="px-2.5 py-0.5 text-[10px] font-mono font-bold rounded"
             style={{ border: "1.5px solid rgba(212,175,55,0.3)", color: "rgba(212,175,55,0.6)" }}
-          >WATCH</motion.button>
+          >WATCH LIVE</motion.button>
         </span>
       </td>
     </motion.tr>
@@ -384,7 +384,7 @@ function SngRow({ entry, index }: { entry: ApiSng; index: number }) {
           className="px-2.5 py-0.5 text-[10px] font-mono font-bold rounded"
           style={{ background: "rgba(99,102,241,0.1)", border: "1.5px solid rgba(99,102,241,0.4)", color: "#818cf8" }}
         >
-          {isRunning ? "WATCH" : "REGISTER"}
+          {isRunning ? "WATCH LIVE" : "OPEN REG"}
         </motion.button>
       </td>
     </motion.tr>
@@ -442,7 +442,7 @@ function MttRow({ entry, index }: { entry: ApiMtt; index: number }) {
           className="px-2.5 py-0.5 text-[10px] font-mono font-bold rounded"
           style={{ background: "rgba(212,175,55,0.08)", border: "1.5px solid rgba(212,175,55,0.3)", color: "#d4af37" }}
         >
-          REGISTER
+          OPEN REG
         </motion.button>
       </td>
     </motion.tr>
